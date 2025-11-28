@@ -92,7 +92,12 @@ export function createAgentStream(
   return stream.pipeThrough(
     new TransformStream<UIMessageChunk, UIMessageChunk>({
       transform(chunk, controller) {
-        // Only process chunks that aren't being skipped
+        // Any activity clears the timeout (including .ignore chunks)
+        if (abortTimeout) {
+          clearTimeout(abortTimeout);
+          abortTimeout = null;
+        }
+
         const isVisible = !chunk.type.endsWith(".ignore");
         const shouldEnqueue = isVisible && visibleCount >= startIndex;
 
@@ -100,13 +105,8 @@ export function createAgentStream(
           visibleCount++;
         }
 
-        // Only handle finish/timeout logic for chunks we're actually sending
         if (shouldEnqueue) {
-          if (abortTimeout) {
-            clearTimeout(abortTimeout);
-            abortTimeout = null;
-          }
-
+          // Only set finish timeout for chunks we're actually sending
           if (chunk.type === "finish") {
             abortTimeout = setTimeout(() => {
               if (terminated) return;
