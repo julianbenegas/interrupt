@@ -104,6 +104,9 @@ importers:
       workflow:
         specifier: 4.0.1-beta.22
         version: 4.0.1-beta.22(@aws-sdk/client-sts@3.940.0)(@babel/core@7.28.5)(@opentelemetry/api@1.9.0)(next@16.0.5(@babel/core@7.28.5)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
+      zod:
+        specifier: ^4.1.13
+        version: 4.1.13
     devDependencies:
       '@tailwindcss/postcss':
         specifier: ^4

@@ -63,16 +63,11 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
   });
 
   const handleSubmit = async (message: PromptInputMessage) => {
-    const hasText = Boolean(message.text);
-    const hasAttachments = Boolean(message.files?.length);
-    if (!(hasText || hasAttachments)) {
-      return;
-    }
     const ogInput = input;
     setInput("");
     try {
       await sendMessage({
-        text: message.text || "Sent with attachments",
+        text: message.text || "",
         files: message.files,
       });
     } catch (error) {
@@ -151,7 +146,13 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
                         </Reasoning>
                       );
                     default:
-                      return null;
+                      return (
+                        <div key={`${message.id}-${i}`}>
+                          <pre className="text-xs text-muted-foreground font-mono">
+                            <code>{JSON.stringify(part, null, 2)}</code>
+                          </pre>
+                        </div>
+                      );
                   }
                 })}
               </div>
@@ -210,7 +211,10 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
                 </PromptInputSelectContent>
               </PromptInputSelect>
             </PromptInputTools>
-            <PromptInputSubmit disabled={!input && !status} status={status} />
+            <PromptInputSubmit
+              disabled={!input && status === "ready"}
+              status={status}
+            />
           </PromptInputFooter>
         </PromptInput>
       </div>
@@ -236,6 +240,8 @@ function useDurableChat({
   const router = useRouter();
   const [localMessages, setLocalMessages] = React.useState<UIMessage[]>([]);
   const [status, setStatus] = React.useState<ChatStatus>("ready");
+  const statusRef = React.useRef<ChatStatus>(status);
+  statusRef.current = status;
   const assistantMessageCountRef = React.useRef(
     chat?.assistantMessages?.length ?? 0
   );
@@ -244,6 +250,7 @@ function useDurableChat({
   const runIdRef = React.useRef<string | null>(chat?.runId ?? null);
   const abortControllerRef = React.useRef<AbortController | null>(null);
   const resumedStream = React.useRef(false);
+  const queuedMessagesRef = React.useRef<PromptInputMessage[]>([]);
 
   const processStream = React.useCallback(
     async (
@@ -617,6 +624,35 @@ function useDurableChat({
 
   const sendMessage = React.useCallback(
     async (message: PromptInputMessage) => {
+      const hasContent =
+        Boolean(message.text) || Boolean(message.files?.length);
+      const isBusy = statusRef.current !== "ready";
+
+      if (isBusy) {
+        if (hasContent) {
+          queuedMessagesRef.current.push(message);
+        }
+        if (runIdRef.current && chatIdRef.current) {
+          try {
+            await fetch(
+              `/api/chat/${encodeURIComponent(runIdRef.current)}/interrupt`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ chatId: chatIdRef.current }),
+              }
+            );
+          } catch (error) {
+            console.error("interrupt error:", error);
+          }
+        }
+        return;
+      }
+
+      if (!hasContent) {
+        return;
+      }
+
       abortControllerRef.current?.abort();
       abortControllerRef.current = new AbortController();
 
@@ -737,6 +773,19 @@ function useDurableChat({
       resumeStream();
     }
   }, [chat?.id, chat?.streamingMessageIndex, resumeStream]);
+
+  const sendMessageRef = React.useRef(sendMessage);
+  sendMessageRef.current = sendMessage;
+
+  React.useEffect(() => {
+    if (status === "ready" && queuedMessagesRef.current.length > 0) {
+      const queued = queuedMessagesRef.current;
+      queuedMessagesRef.current = [];
+      const mergedText = queued.map((m) => m.text).join("\n\n");
+      const mergedFiles = queued.flatMap((m) => m.files ?? []);
+      sendMessageRef.current({ text: mergedText, files: mergedFiles });
+    }
+  }, [status]);
 
   return { sendMessage, messages, status, resumeStream };
 }
