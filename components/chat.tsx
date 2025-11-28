@@ -180,6 +180,7 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
             <PromptInputTextarea
               onChange={(e) => setInput(e.target.value)}
               value={input}
+              autoFocus
             />
           </PromptInputBody>
           <PromptInputFooter>
@@ -252,305 +253,293 @@ function useDurableChat({
   const resumedStream = React.useRef(false);
   const queuedMessagesRef = React.useRef<PromptInputMessage[]>([]);
 
-  const processStream = React.useCallback(
-    async (
-      response: Response,
-      { onNewMessage }: { onNewMessage?: (chatId: string) => void } = {}
-    ) => {
-      const runId = response.headers.get("x-workflow-run-id");
-      if (runId) {
-        runIdRef.current = runId;
-      }
+  const processStream = React.useCallback(async (response: Response) => {
+    const runId = response.headers.get("x-workflow-run-id");
+    if (runId) {
+      runIdRef.current = runId;
+    }
 
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("No response body");
-      }
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("No response body");
+    }
 
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let currentMessage: StreamingMessage | null = null;
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let currentMessage: StreamingMessage | null = null;
 
-      const flushCurrentMessage = () => {
-        if (currentMessage) {
-          const finalMessage: UIMessage = {
-            id: currentMessage.id,
-            role: currentMessage.role,
-            parts: currentMessage.parts,
-          };
-          setLocalMessages((prev) => {
-            const existingIndex = prev.findIndex(
-              (m) => m.id === finalMessage.id
-            );
-            if (existingIndex >= 0) {
-              const updated = [...prev];
-              updated[existingIndex] = finalMessage;
-              return updated;
-            }
-            return [...prev, finalMessage];
-          });
-        }
-      };
-
-      const startNewMessage = (): StreamingMessage => {
-        flushCurrentMessage();
-        const newId = `assistant-${messageIdCounterRef.current++}`;
-        currentMessage = {
-          id: newId,
-          role: "assistant",
-          parts: [],
-          partIndex: new Map(),
+    const flushCurrentMessage = () => {
+      if (currentMessage) {
+        const finalMessage: UIMessage = {
+          id: currentMessage.id,
+          role: currentMessage.role,
+          parts: currentMessage.parts,
         };
-        return currentMessage;
+        setLocalMessages((prev) => {
+          const existingIndex = prev.findIndex((m) => m.id === finalMessage.id);
+          if (existingIndex >= 0) {
+            const updated = [...prev];
+            updated[existingIndex] = finalMessage;
+            return updated;
+          }
+          return [...prev, finalMessage];
+        });
+      }
+    };
+
+    const startNewMessage = (): StreamingMessage => {
+      flushCurrentMessage();
+      const newId = `assistant-${messageIdCounterRef.current++}`;
+      currentMessage = {
+        id: newId,
+        role: "assistant",
+        parts: [],
+        partIndex: new Map(),
       };
+      return currentMessage;
+    };
 
-      const getCurrentMessage = (): StreamingMessage => {
-        if (!currentMessage) {
-          return startNewMessage();
-        }
-        return currentMessage;
-      };
+    const getCurrentMessage = (): StreamingMessage => {
+      if (!currentMessage) {
+        return startNewMessage();
+      }
+      return currentMessage;
+    };
 
-      setStatus("streaming");
+    setStatus("streaming");
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
 
-          let streamDone = false;
-          for (const line of lines) {
-            if (!line.trim()) continue;
+        let streamDone = false;
+        for (const line of lines) {
+          if (!line.trim()) continue;
 
-            try {
-              let jsonStr: string;
+          try {
+            let jsonStr: string;
 
-              // Handle different stream formats
-              if (line.startsWith("data:")) {
-                jsonStr = line.slice(5).trim();
-                if (jsonStr === "[DONE]") {
-                  streamDone = true;
-                  break;
+            // Handle different stream formats
+            if (line.startsWith("data:")) {
+              jsonStr = line.slice(5).trim();
+              if (jsonStr === "[DONE]") {
+                streamDone = true;
+                break;
+              }
+            } else if (line.match(/^\d+:/)) {
+              // Data stream protocol: "0:", "2:", etc.
+              jsonStr = line.slice(line.indexOf(":") + 1);
+            } else {
+              continue;
+            }
+
+            const chunk = JSON.parse(jsonStr);
+            const typedChunk = chunk as UIMessageChunk;
+
+            const updateLocalMessages = () => {
+              const msg = currentMessage;
+              if (!msg) return;
+              setLocalMessages((prev) => {
+                const idx = prev.findIndex((m) => m.id === msg.id);
+                if (idx < 0) {
+                  return [
+                    ...prev,
+                    {
+                      id: msg.id,
+                      role: "assistant" as const,
+                      parts: [...msg.parts],
+                    },
+                  ];
                 }
-              } else if (line.match(/^\d+:/)) {
-                // Data stream protocol: "0:", "2:", etc.
-                jsonStr = line.slice(line.indexOf(":") + 1);
-              } else {
-                continue;
+                const updated = [...prev];
+                updated[idx] = { ...updated[idx], parts: [...msg.parts] };
+                return updated;
+              });
+            };
+
+            switch (typedChunk.type) {
+              // Message boundaries
+              case "start": {
+                startNewMessage();
+                break;
+              }
+              case "finish": {
+                flushCurrentMessage();
+                currentMessage = null;
+                assistantMessageCountRef.current++;
+                break;
               }
 
-              const chunk = JSON.parse(jsonStr);
-              const typedChunk = chunk as UIMessageChunk;
-
-              const updateLocalMessages = () => {
-                const msg = currentMessage;
-                if (!msg) return;
-                setLocalMessages((prev) => {
-                  const idx = prev.findIndex((m) => m.id === msg.id);
-                  if (idx < 0) {
-                    return [
-                      ...prev,
-                      {
-                        id: msg.id,
-                        role: "assistant" as const,
-                        parts: [...msg.parts],
-                      },
-                    ];
-                  }
-                  const updated = [...prev];
-                  updated[idx] = { ...updated[idx], parts: [...msg.parts] };
-                  return updated;
-                });
-              };
-
-              switch (typedChunk.type) {
-                // Message boundaries
-                case "start": {
-                  startNewMessage();
-                  if (onNewMessage && chatIdRef.current) {
-                    onNewMessage(chatIdRef.current);
-                    onNewMessage = undefined;
-                  }
-                  break;
-                }
-                case "finish": {
-                  flushCurrentMessage();
-                  currentMessage = null;
-                  assistantMessageCountRef.current++;
-                  break;
-                }
-
-                // Text
-                case "text-start": {
-                  const msg = getCurrentMessage();
-                  msg.partIndex.set(`text-${typedChunk.id}`, msg.parts.length);
+              // Text
+              case "text-start": {
+                const msg = getCurrentMessage();
+                msg.partIndex.set(`text-${typedChunk.id}`, msg.parts.length);
+                msg.parts.push({ type: "text", text: "" });
+                break;
+              }
+              case "text-delta": {
+                const msg = getCurrentMessage();
+                const partKey = `text-${typedChunk.id}`;
+                let partIdx = msg.partIndex.get(partKey);
+                if (partIdx === undefined) {
+                  partIdx = msg.parts.length;
+                  msg.partIndex.set(partKey, partIdx);
                   msg.parts.push({ type: "text", text: "" });
-                  break;
                 }
-                case "text-delta": {
-                  const msg = getCurrentMessage();
-                  const partKey = `text-${typedChunk.id}`;
-                  let partIdx = msg.partIndex.get(partKey);
-                  if (partIdx === undefined) {
-                    partIdx = msg.parts.length;
-                    msg.partIndex.set(partKey, partIdx);
-                    msg.parts.push({ type: "text", text: "" });
-                  }
-                  const textPart = msg.parts[partIdx];
-                  if (textPart?.type === "text") {
-                    textPart.text += typedChunk.delta;
-                  }
-                  updateLocalMessages();
-                  break;
+                const textPart = msg.parts[partIdx];
+                if (textPart?.type === "text") {
+                  textPart.text += typedChunk.delta;
                 }
+                updateLocalMessages();
+                break;
+              }
 
-                // Reasoning
-                case "reasoning-start": {
-                  const msg = getCurrentMessage();
-                  msg.partIndex.set(
-                    `reasoning-${typedChunk.id}`,
-                    msg.parts.length
-                  );
+              // Reasoning
+              case "reasoning-start": {
+                const msg = getCurrentMessage();
+                msg.partIndex.set(
+                  `reasoning-${typedChunk.id}`,
+                  msg.parts.length
+                );
+                msg.parts.push({ type: "reasoning", text: "" });
+                break;
+              }
+              case "reasoning-delta": {
+                const msg = getCurrentMessage();
+                const partKey = `reasoning-${typedChunk.id}`;
+                let partIdx = msg.partIndex.get(partKey);
+                if (partIdx === undefined) {
+                  partIdx = msg.parts.length;
+                  msg.partIndex.set(partKey, partIdx);
                   msg.parts.push({ type: "reasoning", text: "" });
-                  break;
                 }
-                case "reasoning-delta": {
-                  const msg = getCurrentMessage();
-                  const partKey = `reasoning-${typedChunk.id}`;
-                  let partIdx = msg.partIndex.get(partKey);
-                  if (partIdx === undefined) {
-                    partIdx = msg.parts.length;
-                    msg.partIndex.set(partKey, partIdx);
-                    msg.parts.push({ type: "reasoning", text: "" });
-                  }
-                  const reasoningPart = msg.parts[partIdx];
-                  if (reasoningPart?.type === "reasoning") {
-                    reasoningPart.text += typedChunk.delta;
-                  }
-                  updateLocalMessages();
-                  break;
+                const reasoningPart = msg.parts[partIdx];
+                if (reasoningPart?.type === "reasoning") {
+                  reasoningPart.text += typedChunk.delta;
                 }
+                updateLocalMessages();
+                break;
+              }
 
-                // Tool calls
-                case "tool-input-start": {
-                  const msg = getCurrentMessage();
-                  msg.partIndex.set(
-                    `tool-${typedChunk.toolCallId}`,
-                    msg.parts.length
-                  );
+              // Tool calls
+              case "tool-input-start": {
+                const msg = getCurrentMessage();
+                msg.partIndex.set(
+                  `tool-${typedChunk.toolCallId}`,
+                  msg.parts.length
+                );
+                msg.parts.push({
+                  type: "tool-invocation",
+                  toolInvocation: {
+                    state: "partial-call",
+                    toolCallId: typedChunk.toolCallId,
+                    toolName: typedChunk.toolName,
+                    args: {},
+                  },
+                });
+                updateLocalMessages();
+                break;
+              }
+              case "tool-input-available": {
+                const msg = getCurrentMessage();
+                const partKey = `tool-${typedChunk.toolCallId}`;
+                let partIdx = msg.partIndex.get(partKey);
+                if (partIdx === undefined) {
+                  partIdx = msg.parts.length;
+                  msg.partIndex.set(partKey, partIdx);
                   msg.parts.push({
                     type: "tool-invocation",
                     toolInvocation: {
-                      state: "partial-call",
+                      state: "call",
                       toolCallId: typedChunk.toolCallId,
                       toolName: typedChunk.toolName,
-                      args: {},
+                      args: typedChunk.input,
                     },
                   });
-                  updateLocalMessages();
-                  break;
-                }
-                case "tool-input-available": {
-                  const msg = getCurrentMessage();
-                  const partKey = `tool-${typedChunk.toolCallId}`;
-                  let partIdx = msg.partIndex.get(partKey);
-                  if (partIdx === undefined) {
-                    partIdx = msg.parts.length;
-                    msg.partIndex.set(partKey, partIdx);
-                    msg.parts.push({
-                      type: "tool-invocation",
-                      toolInvocation: {
-                        state: "call",
-                        toolCallId: typedChunk.toolCallId,
-                        toolName: typedChunk.toolName,
-                        args: typedChunk.input,
-                      },
-                    });
-                  } else {
-                    const toolPart = msg.parts[partIdx];
-                    if (toolPart?.type === "tool-invocation") {
-                      toolPart.toolInvocation = {
-                        state: "call",
-                        toolCallId: typedChunk.toolCallId,
-                        toolName: typedChunk.toolName,
-                        args: typedChunk.input,
-                      };
-                    }
+                } else {
+                  const toolPart = msg.parts[partIdx];
+                  if (toolPart?.type === "tool-invocation") {
+                    toolPart.toolInvocation = {
+                      state: "call",
+                      toolCallId: typedChunk.toolCallId,
+                      toolName: typedChunk.toolName,
+                      args: typedChunk.input,
+                    };
                   }
-                  updateLocalMessages();
-                  break;
                 }
-                case "tool-output-available": {
-                  const msg = getCurrentMessage();
-                  const partKey = `tool-${typedChunk.toolCallId}`;
-                  const partIdx = msg.partIndex.get(partKey);
-                  if (partIdx !== undefined) {
-                    const toolPart = msg.parts[partIdx];
-                    if (toolPart?.type === "tool-invocation") {
-                      toolPart.toolInvocation = {
-                        ...toolPart.toolInvocation,
-                        state: "result",
-                        result: typedChunk.output,
-                      };
-                    }
-                  }
-                  updateLocalMessages();
-                  break;
-                }
-
-                // Sources
-                case "source-url": {
-                  const msg = getCurrentMessage();
-                  msg.parts.push({
-                    type: "source-url",
-                    sourceId: typedChunk.sourceId,
-                    url: typedChunk.url,
-                    title: typedChunk.title,
-                  });
-                  updateLocalMessages();
-                  break;
-                }
-
-                // Ignore step markers and other chunks
-                case "start-step":
-                case "finish-step":
-                case "text-end":
-                case "reasoning-end":
-                case "tool-input-delta":
-                case "tool-input-error":
-                case "tool-output-error":
-                  break;
-
-                default:
-                  // Unknown chunk type - ignore
-                  break;
+                updateLocalMessages();
+                break;
               }
-              if (streamDone) break;
-            } catch {
-              // skip malformed chunks
-            }
-          }
-          if (streamDone) break;
-        }
+              case "tool-output-available": {
+                const msg = getCurrentMessage();
+                const partKey = `tool-${typedChunk.toolCallId}`;
+                const partIdx = msg.partIndex.get(partKey);
+                if (partIdx !== undefined) {
+                  const toolPart = msg.parts[partIdx];
+                  if (toolPart?.type === "tool-invocation") {
+                    toolPart.toolInvocation = {
+                      ...toolPart.toolInvocation,
+                      state: "result",
+                      result: typedChunk.output,
+                    };
+                  }
+                }
+                updateLocalMessages();
+                break;
+              }
 
+              // Sources
+              case "source-url": {
+                const msg = getCurrentMessage();
+                msg.parts.push({
+                  type: "source-url",
+                  sourceId: typedChunk.sourceId,
+                  url: typedChunk.url,
+                  title: typedChunk.title,
+                });
+                updateLocalMessages();
+                break;
+              }
+
+              // Ignore step markers and other chunks
+              case "start-step":
+              case "finish-step":
+              case "text-end":
+              case "reasoning-end":
+              case "tool-input-delta":
+              case "tool-input-error":
+              case "tool-output-error":
+                break;
+
+              default:
+                // Unknown chunk type - ignore
+                break;
+            }
+            if (streamDone) break;
+          } catch {
+            // skip malformed chunks
+          }
+        }
+        if (streamDone) break;
+      }
+
+      flushCurrentMessage();
+      setStatus("ready");
+    } catch (error) {
+      if ((error as Error).name === "AbortError") {
         flushCurrentMessage();
         setStatus("ready");
-      } catch (error) {
-        if ((error as Error).name === "AbortError") {
-          flushCurrentMessage();
-          setStatus("ready");
-        } else {
-          setStatus("error");
-          throw error;
-        }
+      } else {
+        setStatus("error");
+        throw error;
       }
-    },
-    []
-  );
+    }
+  }, []);
 
   const messages = React.useMemo(() => {
     const result: UIMessage[] = [];
@@ -702,13 +691,11 @@ function useDurableChat({
           throw new Error(`HTTP ${response.status}: ${await response.text()}`);
         }
 
-        await processStream(response, {
-          onNewMessage: isNewChat
-            ? (chatId) => {
-                router.push(`/${chatId}`);
-              }
-            : undefined,
-        });
+        if (isNewChat) {
+          router.push(`/${newChatId}`);
+        }
+
+        await processStream(response);
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
           setStatus("error");
