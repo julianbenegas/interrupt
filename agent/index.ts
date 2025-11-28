@@ -37,10 +37,25 @@ export async function agent({
   const setMessages = (newMessages: ModelMessage[]) => {
     messages = newMessages;
   };
-  await onAgentEvent(initialEvent, { chatId, model, messages, setMessages });
+
+  let messageIndex = 0;
+  await onAgentEvent(initialEvent, {
+    chatId,
+    model,
+    messages,
+    setMessages,
+    messageIndex,
+  });
 
   for await (const event of hook) {
-    await onAgentEvent(event, { chatId, model, messages, setMessages });
+    messageIndex++;
+    await onAgentEvent(event, {
+      chatId,
+      model,
+      messages,
+      setMessages,
+      messageIndex,
+    });
   }
 }
 
@@ -51,15 +66,16 @@ async function onAgentEvent(
     model,
     messages,
     setMessages,
+    messageIndex,
   }: {
     chatId: string;
     model: string;
     messages: ModelMessage[];
     setMessages: (newMessages: ModelMessage[]) => void;
+    messageIndex: number;
   }
 ) {
-  const writable = getWritable();
-  await signalEventStartStep({ writable });
+  const writable = getWritable({ namespace: String(messageIndex) });
 
   let finishReason: FinishReason | undefined = undefined;
   let stepCount = 0;
@@ -158,18 +174,6 @@ async function sendInterruptionMessageStep({
   return messages;
 }
 
-async function signalEventStartStep({
-  writable,
-}: {
-  writable: WritableStream<UIMessageChunk>;
-}) {
-  "use step";
-  const writer = writable.getWriter();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  writer.write({ type: "event-start.ignore" as any });
-  writer.releaseLock();
-}
-
 async function sendFinishMessageStep({
   writable,
 }: {
@@ -178,7 +182,7 @@ async function sendFinishMessageStep({
   "use step";
   const writer = writable.getWriter();
   writer.write({ type: "finish" });
-  writer.releaseLock();
+  await writer.close();
 }
 
 async function storeAssistantMessagesStep({
@@ -196,5 +200,6 @@ async function storeAssistantMessagesStep({
   await redis.set<StoredChat>(`chat:${chatId}`, {
     ...chat,
     assistantMessages: messages.filter((m) => m.role === "assistant"),
+    streamingMessageIndex: null, // Clear streaming flag
   });
 }

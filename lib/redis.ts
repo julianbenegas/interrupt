@@ -10,11 +10,17 @@ export type StoredChat = {
   runId: string;
   userMessages: { data: UIMessage; index: number; author: string }[];
   assistantMessages: ModelMessage[];
+  /** Index of the message currently being streamed, or null if idle */
+  streamingMessageIndex: number | null;
 };
 
 export type StoredChatClient = Pick<
   StoredChat,
-  "id" | "runId" | "userMessages" | "assistantMessages"
+  | "id"
+  | "runId"
+  | "userMessages"
+  | "assistantMessages"
+  | "streamingMessageIndex"
 >;
 export function toClientStoredChat(chat: StoredChat): StoredChatClient {
   return {
@@ -22,6 +28,7 @@ export function toClientStoredChat(chat: StoredChat): StoredChatClient {
     runId: chat.runId,
     userMessages: chat.userMessages,
     assistantMessages: chat.assistantMessages,
+    streamingMessageIndex: chat.streamingMessageIndex,
   };
 }
 

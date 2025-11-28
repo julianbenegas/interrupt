@@ -14,7 +14,7 @@ export interface ChatRequest {
   followUp?: {
     chatId: string;
     userMessageIndex: number;
-    skipMessages: number;
+    messageIndex: number;
   };
   newChatId?: string;
 }
@@ -48,6 +48,7 @@ export async function POST(request: Request) {
           ...chat.userMessages,
           { data: message, index: followUp.userMessageIndex, author: "user" },
         ],
+        streamingMessageIndex: followUp.messageIndex,
       });
     } else if (body.newChatId) {
       const run = await start(agent, [
@@ -63,6 +64,7 @@ export async function POST(request: Request) {
         runId,
         userMessages: [{ data: message, index: 0, author: "user" }],
         assistantMessages: [],
+        streamingMessageIndex: 0,
       });
     } else {
       throw new Error("expected newChatId or followUp by this point");
@@ -73,11 +75,11 @@ export async function POST(request: Request) {
     }
 
     const run = getRun(runId);
-    const skipMessages = followUp?.skipMessages ?? 0;
-    const stream = createAgentStream(run.getReadable(), {
-      skipMessages,
-      signal: request.signal,
-    });
+    const messageIndex = followUp?.messageIndex ?? 0;
+    const stream = createAgentStream(
+      run.getReadable({ namespace: String(messageIndex) }),
+      { signal: request.signal }
+    );
 
     return createGracefulStreamResponse(stream, {
       headers: { "x-workflow-run-id": runId },

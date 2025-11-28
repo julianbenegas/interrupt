@@ -156,7 +156,11 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
                 })}
               </div>
             ))}
-            {status === "submitted" && <Loader />}
+            {status === "submitted" && (
+              <div className="flex justify-center items-center">
+                <Loader />
+              </div>
+            )}
           </ConversationContent>
           <ConversationScrollButton />
         </Conversation>
@@ -333,13 +337,6 @@ function useDurableChat({
               }
 
               const chunk = JSON.parse(jsonStr);
-
-              // Handle custom stream-done signal (not part of UIMessageChunk)
-              if (chunk.type === "stream-done") {
-                streamDone = true;
-                break;
-              }
-
               const typedChunk = chunk as UIMessageChunk;
 
               const updateLocalMessages = () => {
@@ -643,7 +640,7 @@ function useDurableChat({
                 message: userMessage,
                 followUp: {
                   chatId: newChatId,
-                  skipMessages: assistantMessageCountRef.current,
+                  messageIndex: assistantMessageCountRef.current,
                   userMessageIndex: messages.length,
                 },
               }
@@ -687,7 +684,13 @@ function useDurableChat({
   );
 
   const resumeStream = React.useCallback(async () => {
-    if (!runIdRef.current) return;
+    if (
+      !runIdRef.current ||
+      chat?.streamingMessageIndex === null ||
+      chat?.streamingMessageIndex === undefined
+    ) {
+      return;
+    }
 
     abortControllerRef.current?.abort();
     abortControllerRef.current = new AbortController();
@@ -699,10 +702,7 @@ function useDurableChat({
         `/api/chat/${encodeURIComponent(runIdRef.current)}`,
         window.location.origin
       );
-      url.searchParams.set(
-        "skipMessages",
-        String(assistantMessageCountRef.current)
-      );
+      url.searchParams.set("messageIndex", String(chat.streamingMessageIndex));
 
       const response = await fetch(url, {
         method: "GET",
@@ -724,14 +724,19 @@ function useDurableChat({
         console.error("resumeStream error:", error);
       }
     }
-  }, [processStream]);
+  }, [chat?.streamingMessageIndex, processStream]);
 
   React.useEffect(() => {
-    if (chat?.id && !resumedStream.current) {
+    // Only resume if there's actually a stream in progress
+    if (
+      chat?.id &&
+      chat.streamingMessageIndex !== null &&
+      !resumedStream.current
+    ) {
       resumedStream.current = true;
       resumeStream();
     }
-  }, [chat?.id, resumeStream]);
+  }, [chat?.id, chat?.streamingMessageIndex, resumeStream]);
 
   return { sendMessage, messages, status, resumeStream };
 }

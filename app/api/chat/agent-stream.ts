@@ -60,78 +60,30 @@ export function createGracefulStreamResponse(
 
 /**
  * Creates a filtered agent stream that:
- * - Skips complete messages until skipMessages have passed (counts "start" chunks)
- * - Filters out .ignore chunks (but still uses them to detect activity)
- * - Closes after "finish" chunk + grace period (unless new chunks arrive)
- * - Cancels when abortSignal fires (client disconnect)
+ * - Filters out .ignore chunks
+ * - Cancels source stream when client disconnects
+ *
+ * With namespaced streams, each stream contains only one message and closes
+ * naturally when the agent calls writer.close().
  */
 export function createAgentStream(
   stream: ReadableStream<UIMessageChunk>,
-  options: {
-    skipMessages?: number;
-    onAbort?: () => void;
-    signal?: AbortSignal;
-  } = {}
+  options: { signal?: AbortSignal } = {}
 ): ReadableStream<UIMessageChunk> {
-  const { skipMessages = 0, onAbort, signal } = options;
-  let messageCount = 0; // Counts "start" chunks (message boundaries)
-  let abortTimeout: NodeJS.Timeout | null = null;
-  let terminated = false;
+  const { signal } = options;
 
   // Cancel source stream when client disconnects
   signal?.addEventListener("abort", () => {
-    if (abortTimeout) {
-      clearTimeout(abortTimeout);
-      abortTimeout = null;
-    }
-    terminated = true;
     stream.cancel().catch(() => {});
-    onAbort?.();
   });
 
   return stream.pipeThrough(
     new TransformStream<UIMessageChunk, UIMessageChunk>({
       transform(chunk, controller) {
-        // Any activity clears the timeout (including .ignore chunks)
-        if (abortTimeout) {
-          clearTimeout(abortTimeout);
-          abortTimeout = null;
-        }
-
-        // Count message boundaries (start chunks)
-        if (chunk.type === "start") {
-          messageCount++;
-        }
-
-        const isVisible = !chunk.type.endsWith(".ignore");
-        const shouldEnqueue = isVisible && messageCount > skipMessages;
-
-        // Set timeout on any finish chunk once we've reached/passed the skip threshold.
-        // This handles the case where we skip all messages and there's no new content.
-        if (chunk.type === "finish" && messageCount >= skipMessages) {
-          abortTimeout = setTimeout(() => {
-            if (terminated) return;
-            terminated = true;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            controller.enqueue({ type: "stream-done" } as any);
-            stream.cancel().catch(() => {});
-            onAbort?.();
-          }, 500);
-        }
-
-        if (shouldEnqueue) {
+        // Filter out .ignore chunks
+        if (!chunk.type.endsWith(".ignore")) {
           controller.enqueue(chunk);
         }
-      },
-      flush() {
-        // Stream closed naturally - cancel the timeout to prevent enqueue on closed stream
-        if (abortTimeout) {
-          clearTimeout(abortTimeout);
-          abortTimeout = null;
-        }
-        if (terminated) return;
-        terminated = true;
-        onAbort?.();
       },
     })
   );
