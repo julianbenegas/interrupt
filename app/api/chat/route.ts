@@ -1,10 +1,6 @@
 import { agent, agentHook } from "@/agent";
-import { UIMessage } from "ai";
+import { createUIMessageStreamResponse, UIMessage } from "ai";
 import { getRun, start } from "workflow/api";
-import {
-  createAgentStream,
-  createGracefulStreamResponse,
-} from "./agent-stream";
 import { getModel } from "@/lib/models";
 import { redis, StoredChat } from "@/lib/redis";
 
@@ -76,12 +72,9 @@ export async function POST(request: Request) {
 
     const run = getRun(runId);
     const messageIndex = followUp?.messageIndex ?? 0;
-    const stream = createAgentStream(
-      run.getReadable({ namespace: String(messageIndex) }),
-      { signal: request.signal }
-    );
 
-    return createGracefulStreamResponse(stream, {
+    return createUIMessageStreamResponse({
+      stream: run.getReadable({ namespace: String(messageIndex) }),
       headers: { "x-workflow-run-id": runId },
     });
   } catch (error) {

@@ -1,7 +1,4 @@
-import {
-  createAgentStream,
-  createGracefulStreamResponse,
-} from "../agent-stream";
+import { createUIMessageStreamResponse } from "ai";
 import { getRun } from "workflow/api";
 
 export async function GET(
@@ -14,12 +11,8 @@ export async function GET(
 
   const run = getRun(runId);
 
-  const stream = createAgentStream(
-    run.getReadable({ namespace: messageIndex }),
-    { signal: request.signal }
-  );
-
-  return createGracefulStreamResponse(stream, {
+  return createUIMessageStreamResponse({
+    stream: run.getReadable({ namespace: messageIndex }),
     headers: { "x-workflow-run-id": runId },
   });
 }
