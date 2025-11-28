@@ -1,6 +1,5 @@
 "use client";
 import * as React from "react";
-import { WorkflowChatTransport } from "@workflow/ai";
 import {
   Conversation,
   ConversationContent,
@@ -34,8 +33,7 @@ import {
   PromptInputFooter,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
-import { useChat } from "@ai-sdk/react";
-import { CopyIcon, RefreshCcwIcon } from "lucide-react";
+import { CopyIcon } from "lucide-react";
 import {
   Source,
   Sources,
@@ -49,16 +47,17 @@ import {
 } from "@/components/ai-elements/reasoning";
 import { Loader } from "@/components/ai-elements/loader";
 import { StoredChatClient } from "@/lib/redis";
-import { nanoid } from "nanoid";
 import { useRouter } from "next/navigation";
 import { ChatRequest } from "@/app/api/chat/route";
 import { models } from "@/lib/models";
+import type { UIMessage, UIMessageChunk } from "ai";
+
+export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
 export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
   const [input, setInput] = React.useState("");
   const [model, setModel] = React.useState<string>(models[0].value);
-  const router = useRouter();
-  const { sendMessage, regenerate, messages, status } = useDurableChat({
+  const { sendMessage, messages, status } = useDurableChat({
     chat,
     model,
   });
@@ -69,21 +68,16 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
     if (!(hasText || hasAttachments)) {
       return;
     }
-    const newChatId = chat ? undefined : nanoid();
-    await sendMessage(
-      { text: message.text || "Sent with attachments", files: message.files },
-      chat
-        ? {
-            body: { followUp: { chatId: chat.id } } satisfies Omit<
-              ChatRequest,
-              "message"
-            >,
-          }
-        : { body: { model, newChatId } satisfies Omit<ChatRequest, "message"> }
-    );
+    const ogInput = input;
     setInput("");
-    if (!chat) {
-      router.push(`/${newChatId}`);
+    try {
+      await sendMessage({
+        text: message.text || "Sent with attachments",
+        files: message.files,
+      });
+    } catch (error) {
+      setInput(ogInput);
+      throw error;
     }
   };
 
@@ -129,12 +123,6 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
                           {message.role === "assistant" &&
                             i === messages.length - 1 && (
                               <MessageActions>
-                                <MessageAction
-                                  onClick={() => regenerate()}
-                                  label="Retry"
-                                >
-                                  <RefreshCcwIcon className="size-3" />
-                                </MessageAction>
                                 <MessageAction
                                   onClick={() =>
                                     navigator.clipboard.writeText(part.text)
@@ -226,6 +214,14 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
   );
 };
 
+type StreamingMessage = {
+  id: string;
+  role: "assistant";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  parts: any[];
+  partIndex: Map<string, number>;
+};
+
 function useDurableChat({
   chat,
   model,
@@ -233,39 +229,460 @@ function useDurableChat({
   chat?: StoredChatClient;
   model: string;
 }) {
-  const [chunkCount, setChunkCount] = React.useState(0);
+  const router = useRouter();
+  const [localMessages, setLocalMessages] = React.useState<UIMessage[]>([]);
+  const [status, setStatus] = React.useState<ChatStatus>("ready");
+  const chunkCountRef = React.useRef(0);
+  const messageIdCounterRef = React.useRef(0);
+  const chatIdRef = React.useRef<string | null>(chat?.id ?? null);
+  const runIdRef = React.useRef<string | null>(chat?.runId ?? null);
+  const abortControllerRef = React.useRef<AbortController | null>(null);
+  const resumedStream = React.useRef(false);
 
-  const { sendMessage, regenerate, messages, status } = useChat({
-    id: chat?.id,
-    transport: new WorkflowChatTransport({
-      api: chat ? `/api/chat/${encodeURIComponent(chat.runId)}` : "/api/chat",
-      prepareSendMessagesRequest: (config) => {
-        console.log("prepareSendMessagesRequest", config);
-        const message = config.messages.at(-1);
-        if (!message) {
-          throw new Error("No message provided");
+  console.log({ localMessages, chat });
+
+  const processStream = React.useCallback(
+    async (
+      response: Response,
+      {
+        onNewMessage,
+      }: {
+        onNewMessage?: (chatId: string) => void;
+      } = {}
+    ) => {
+      const runId = response.headers.get("x-workflow-run-id");
+      if (runId) {
+        runIdRef.current = runId;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("No response body");
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let currentMessage: StreamingMessage | null = null;
+      let chunkIndex = 0;
+
+      const flushCurrentMessage = () => {
+        if (currentMessage) {
+          const finalMessage: UIMessage = {
+            id: currentMessage.id,
+            role: currentMessage.role,
+            parts: currentMessage.parts,
+          };
+          setLocalMessages((prev) => {
+            const existingIndex = prev.findIndex(
+              (m) => m.id === finalMessage.id
+            );
+            if (existingIndex >= 0) {
+              const updated = [...prev];
+              updated[existingIndex] = finalMessage;
+              return updated;
+            }
+            return [...prev, finalMessage];
+          });
         }
-        if (message.role !== "user") {
-          throw new Error("Last message must be a user message");
-        }
-        return {
-          ...config,
-          body: (chat
-            ? { message, followUp: { chatId: chat.id } }
-            : { message, model, newChatId: nanoid() }) satisfies ChatRequest,
+      };
+
+      const startNewMessage = (): StreamingMessage => {
+        flushCurrentMessage();
+        const newId = `assistant-${messageIdCounterRef.current++}`;
+        currentMessage = {
+          id: newId,
+          role: "assistant",
+          parts: [],
+          partIndex: new Map(),
         };
-      },
-      prepareReconnectToStreamRequest: (config) => ({
-        ...config,
-        api: chat ? `/api/chat/${encodeURIComponent(chat.runId)}` : "/api/chat",
-      }),
-      onChatEnd: ({ chunkIndex }) => {
-        setChunkCount((prev) => prev + chunkIndex);
-        // setIsInterrupting(false);
-      },
-      maxConsecutiveErrors: 5,
-    }),
-  });
+        return currentMessage;
+      };
 
-  return { sendMessage, regenerate, messages, status };
+      const getCurrentMessage = (): StreamingMessage => {
+        if (!currentMessage) {
+          return startNewMessage();
+        }
+        return currentMessage;
+      };
+
+      setStatus("streaming");
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+
+            try {
+              let jsonStr: string;
+
+              // Handle different stream formats
+              if (line.startsWith("data:")) {
+                jsonStr = line.slice(5).trim();
+                if (jsonStr === "[DONE]") continue;
+              } else if (line.match(/^\d+:/)) {
+                // Data stream protocol: "0:", "2:", etc.
+                jsonStr = line.slice(line.indexOf(":") + 1);
+              } else {
+                continue;
+              }
+
+              const chunk = JSON.parse(jsonStr) as UIMessageChunk;
+              chunkIndex++;
+
+              const updateLocalMessages = () => {
+                const msg = currentMessage;
+                if (!msg) return;
+                setLocalMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.id === msg.id);
+                  if (idx < 0) {
+                    return [
+                      ...prev,
+                      {
+                        id: msg.id,
+                        role: "assistant" as const,
+                        parts: [...msg.parts],
+                      },
+                    ];
+                  }
+                  const updated = [...prev];
+                  updated[idx] = { ...updated[idx], parts: [...msg.parts] };
+                  return updated;
+                });
+              };
+
+              switch (chunk.type) {
+                // Message boundaries
+                case "start": {
+                  startNewMessage();
+                  if (onNewMessage && chatIdRef.current) {
+                    onNewMessage(chatIdRef.current);
+                    onNewMessage = undefined;
+                  }
+                  break;
+                }
+                case "finish": {
+                  flushCurrentMessage();
+                  currentMessage = null;
+                  break;
+                }
+
+                // Text
+                case "text-start": {
+                  const msg = getCurrentMessage();
+                  msg.partIndex.set(`text-${chunk.id}`, msg.parts.length);
+                  msg.parts.push({ type: "text", text: "" });
+                  break;
+                }
+                case "text-delta": {
+                  const msg = getCurrentMessage();
+                  const partKey = `text-${chunk.id}`;
+                  let partIdx = msg.partIndex.get(partKey);
+                  if (partIdx === undefined) {
+                    partIdx = msg.parts.length;
+                    msg.partIndex.set(partKey, partIdx);
+                    msg.parts.push({ type: "text", text: "" });
+                  }
+                  const textPart = msg.parts[partIdx];
+                  if (textPart?.type === "text") {
+                    textPart.text += chunk.delta;
+                  }
+                  updateLocalMessages();
+                  break;
+                }
+
+                // Reasoning
+                case "reasoning-start": {
+                  const msg = getCurrentMessage();
+                  msg.partIndex.set(`reasoning-${chunk.id}`, msg.parts.length);
+                  msg.parts.push({ type: "reasoning", text: "" });
+                  break;
+                }
+                case "reasoning-delta": {
+                  const msg = getCurrentMessage();
+                  const partKey = `reasoning-${chunk.id}`;
+                  let partIdx = msg.partIndex.get(partKey);
+                  if (partIdx === undefined) {
+                    partIdx = msg.parts.length;
+                    msg.partIndex.set(partKey, partIdx);
+                    msg.parts.push({ type: "reasoning", text: "" });
+                  }
+                  const reasoningPart = msg.parts[partIdx];
+                  if (reasoningPart?.type === "reasoning") {
+                    reasoningPart.text += chunk.delta;
+                  }
+                  updateLocalMessages();
+                  break;
+                }
+
+                // Tool calls
+                case "tool-input-start": {
+                  const msg = getCurrentMessage();
+                  msg.partIndex.set(
+                    `tool-${chunk.toolCallId}`,
+                    msg.parts.length
+                  );
+                  msg.parts.push({
+                    type: "tool-invocation",
+                    toolInvocation: {
+                      state: "partial-call",
+                      toolCallId: chunk.toolCallId,
+                      toolName: chunk.toolName,
+                      args: {},
+                    },
+                  });
+                  updateLocalMessages();
+                  break;
+                }
+                case "tool-input-available": {
+                  const msg = getCurrentMessage();
+                  const partKey = `tool-${chunk.toolCallId}`;
+                  let partIdx = msg.partIndex.get(partKey);
+                  if (partIdx === undefined) {
+                    partIdx = msg.parts.length;
+                    msg.partIndex.set(partKey, partIdx);
+                    msg.parts.push({
+                      type: "tool-invocation",
+                      toolInvocation: {
+                        state: "call",
+                        toolCallId: chunk.toolCallId,
+                        toolName: chunk.toolName,
+                        args: chunk.input,
+                      },
+                    });
+                  } else {
+                    const toolPart = msg.parts[partIdx];
+                    if (toolPart?.type === "tool-invocation") {
+                      toolPart.toolInvocation = {
+                        state: "call",
+                        toolCallId: chunk.toolCallId,
+                        toolName: chunk.toolName,
+                        args: chunk.input,
+                      };
+                    }
+                  }
+                  updateLocalMessages();
+                  break;
+                }
+                case "tool-output-available": {
+                  const msg = getCurrentMessage();
+                  const partKey = `tool-${chunk.toolCallId}`;
+                  const partIdx = msg.partIndex.get(partKey);
+                  if (partIdx !== undefined) {
+                    const toolPart = msg.parts[partIdx];
+                    if (toolPart?.type === "tool-invocation") {
+                      toolPart.toolInvocation = {
+                        ...toolPart.toolInvocation,
+                        state: "result",
+                        result: chunk.output,
+                      };
+                    }
+                  }
+                  updateLocalMessages();
+                  break;
+                }
+
+                // Sources
+                case "source-url": {
+                  const msg = getCurrentMessage();
+                  msg.parts.push({
+                    type: "source-url",
+                    sourceId: chunk.sourceId,
+                    url: chunk.url,
+                    title: chunk.title,
+                  });
+                  updateLocalMessages();
+                  break;
+                }
+
+                // Ignore step markers and other chunks
+                case "start-step":
+                case "finish-step":
+                case "text-end":
+                case "reasoning-end":
+                case "tool-input-delta":
+                case "tool-input-error":
+                case "tool-output-error":
+                  break;
+
+                default:
+                  // Unknown chunk type - ignore
+                  break;
+              }
+            } catch {
+              // skip malformed chunks
+            }
+          }
+        }
+
+        flushCurrentMessage();
+        chunkCountRef.current += chunkIndex;
+        setStatus("ready");
+      } catch (error) {
+        if ((error as Error).name === "AbortError") {
+          flushCurrentMessage();
+          setStatus("ready");
+        } else {
+          setStatus("error");
+          throw error;
+        }
+      }
+    },
+    []
+  );
+
+  const messages = React.useMemo(() => {
+    const result: UIMessage[] = [];
+
+    // Place stored user messages at their correct indices
+    for (const message of chat?.userMessages ?? []) {
+      result[message.index] = message.data;
+    }
+
+    // Merge in local messages
+    let indexToPlaceIn = 0;
+    for (let i = 0; i < localMessages.length; i++) {
+      const localMessage = localMessages[i];
+      if (!localMessage) continue;
+
+      if (!result[indexToPlaceIn]) {
+        result[indexToPlaceIn] = localMessage;
+        indexToPlaceIn++;
+        continue;
+      }
+
+      if (localMessage.role === "user") {
+        indexToPlaceIn++;
+        continue;
+      }
+
+      let placed = false;
+      while (!placed) {
+        if (!result[indexToPlaceIn]) {
+          result[indexToPlaceIn] = localMessage;
+          placed = true;
+        }
+        indexToPlaceIn++;
+      }
+    }
+
+    return result;
+  }, [chat?.userMessages, localMessages]);
+
+  const sendMessage = React.useCallback(
+    async (message: PromptInputMessage) => {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = new AbortController();
+
+      const newChatId = chatIdRef.current ?? crypto.randomUUID();
+      const isNewChat = !chatIdRef.current;
+      chatIdRef.current = newChatId;
+
+      const userMessage: UIMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: message.text ?? "" }],
+      };
+
+      setLocalMessages((prev) => [...prev, userMessage]);
+      setStatus("submitted");
+
+      try {
+        const body: ChatRequest =
+          chatIdRef.current && runIdRef.current && !isNewChat
+            ? {
+                message: userMessage,
+                followUp: {
+                  chatId: newChatId,
+                  streamStartIndex: chunkCountRef.current,
+                  userMessageIndex: messages.length,
+                },
+              }
+            : {
+                message: userMessage,
+                model,
+                newChatId,
+              };
+
+        const api =
+          runIdRef.current && !isNewChat
+            ? `/api/chat/${encodeURIComponent(runIdRef.current)}`
+            : "/api/chat";
+
+        const response = await fetch(api, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: abortControllerRef.current.signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        }
+
+        await processStream(response, {
+          onNewMessage: isNewChat
+            ? (chatId) => {
+                router.push(`/${chatId}`);
+              }
+            : undefined,
+        });
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          setStatus("error");
+          console.error("sendMessage error:", error);
+        }
+      }
+    },
+    [model, processStream, router, messages.length]
+  );
+
+  const resumeStream = React.useCallback(async () => {
+    if (!runIdRef.current) return;
+
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = new AbortController();
+
+    setStatus("submitted");
+
+    try {
+      const response = await fetch(
+        `/api/chat/${encodeURIComponent(runIdRef.current)}`,
+        {
+          method: "GET",
+          signal: abortControllerRef.current.signal,
+        }
+      );
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          setStatus("ready");
+          return;
+        }
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      }
+
+      await processStream(response);
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        setStatus("error");
+        console.error("resumeStream error:", error);
+      }
+    }
+  }, [processStream]);
+
+  React.useEffect(() => {
+    if (chat?.id && !resumedStream.current) {
+      resumedStream.current = true;
+      resumeStream();
+    }
+  }, [chat?.id, resumeStream]);
+
+  return { sendMessage, messages, status, resumeStream };
 }

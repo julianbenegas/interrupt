@@ -14,10 +14,5 @@ export default async function ChatPage({
 
   if (!chat) notFound();
 
-  return (
-    <div>
-      ChatPage {chatId}
-      <Chat chat={toClientStoredChat(chat)} />
-    </div>
-  );
+  return <Chat chat={toClientStoredChat(chat)} />;
 }

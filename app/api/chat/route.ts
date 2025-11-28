@@ -8,17 +8,15 @@ import { redis, StoredChat } from "@/lib/redis";
 export interface ChatRequest {
   message: UIMessage;
   model?: string;
-  followUp?: { chatId: string; startIndex?: number };
+  followUp?: {
+    chatId: string;
+    userMessageIndex: number;
+    streamStartIndex: number;
+  };
   newChatId?: string;
 }
 
 export async function POST(request: Request) {
-  if (process.env.NODE_ENV !== "development") {
-    return new Response("This API is only available in development mode", {
-      status: 403,
-    });
-  }
-
   try {
     const body: ChatRequest = await request.json();
 
@@ -26,6 +24,11 @@ export async function POST(request: Request) {
 
     let runId: string | undefined;
     if (followUp) {
+      const chat = await redis.get<StoredChat>(`chat:${followUp.chatId}`);
+      if (!chat) {
+        return new Response("Chat not found", { status: 404 });
+      }
+
       const hook = await agentHook.resume(followUp.chatId, {
         type: "user-message",
         message,
@@ -36,6 +39,13 @@ export async function POST(request: Request) {
         return new Response("No active workflow found", { status: 404 });
       }
       runId = hook.runId;
+      await redis.set<StoredChat>(`chat:${chat.id}`, {
+        ...chat,
+        userMessages: [
+          ...chat.userMessages,
+          { data: message, index: followUp.userMessageIndex, author: "user" },
+        ],
+      });
     } else if (body.newChatId) {
       const run = await start(agent, [
         {
@@ -48,6 +58,7 @@ export async function POST(request: Request) {
       await redis.set<StoredChat>(`chat:${body.newChatId}`, {
         id: body.newChatId,
         runId,
+        userMessages: [{ data: message, index: 0, author: "user" }],
       });
     } else {
       throw new Error("expected newChatId or followUp by this point");
@@ -58,7 +69,7 @@ export async function POST(request: Request) {
     }
 
     const run = getRun(runId);
-    const startIndex = followUp?.startIndex ?? 0;
+    const startIndex = followUp?.streamStartIndex ?? 0;
     const stream = createAgentStream(run.getReadable(), { startIndex });
 
     return createUIMessageStreamResponse({
