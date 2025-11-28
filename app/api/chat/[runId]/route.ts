@@ -7,9 +7,9 @@ export async function GET(
 ) {
   const { runId } = await params;
   const { searchParams } = new URL(request.url);
-  const startIndexParam = searchParams.get("startIndex");
-  const startIndex =
-    startIndexParam !== null ? parseInt(startIndexParam, 10) : 0;
+  const skipMessagesParam = searchParams.get("skipMessages");
+  const skipMessages =
+    skipMessagesParam !== null ? parseInt(skipMessagesParam, 10) : 0;
 
   const run = getRun(runId);
 
@@ -21,7 +21,7 @@ export async function GET(
   }
 
   const stream = createAgentStream(run.getReadable(), {
-    startIndex,
+    skipMessages,
     signal: request.signal,
   });
 

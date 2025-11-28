@@ -9,7 +9,7 @@ import {
 } from "ai";
 import { defineHook, getWritable } from "workflow";
 import { getTools } from "./tools";
-import { redis, StoredInterrupt } from "@/lib/redis";
+import { redis, StoredChat, StoredInterrupt } from "@/lib/redis";
 
 export type AgentEvent = {
   now: number;
@@ -86,7 +86,9 @@ async function onAgentEvent(
         finishReason = reason;
       },
     });
-    setMessages(latestMessages.filter((m) => m.role !== "system"));
+
+    messages = latestMessages.filter((m) => m.role !== "system");
+    setMessages(messages);
 
     const interrupted = await hasInterruptStep({
       chatId,
@@ -104,7 +106,10 @@ async function onAgentEvent(
     }
   }
 
-  await sendFinishMessageStep({ writable });
+  await Promise.all([
+    sendFinishMessageStep({ writable }),
+    storeAssistantMessagesStep({ chatId, messages }),
+  ]);
 }
 
 async function hasInterruptStep({
@@ -174,4 +179,22 @@ async function sendFinishMessageStep({
   const writer = writable.getWriter();
   writer.write({ type: "finish" });
   writer.releaseLock();
+}
+
+async function storeAssistantMessagesStep({
+  chatId,
+  messages,
+}: {
+  chatId: string;
+  messages: ModelMessage[];
+}) {
+  "use step";
+  const chat = await redis.get<StoredChat>(`chat:${chatId}`);
+  if (!chat) {
+    throw new Error("Chat not found");
+  }
+  await redis.set<StoredChat>(`chat:${chatId}`, {
+    ...chat,
+    assistantMessages: messages.filter((m) => m.role === "assistant"),
+  });
 }

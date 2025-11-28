@@ -60,7 +60,7 @@ export function createGracefulStreamResponse(
 
 /**
  * Creates a filtered agent stream that:
- * - Skips chunks until startIndex visible chunks have passed
+ * - Skips complete messages until skipMessages have passed (counts "start" chunks)
  * - Filters out .ignore chunks (but still uses them to detect activity)
  * - Closes after "finish" chunk + grace period (unless new chunks arrive)
  * - Cancels when abortSignal fires (client disconnect)
@@ -68,13 +68,13 @@ export function createGracefulStreamResponse(
 export function createAgentStream(
   stream: ReadableStream<UIMessageChunk>,
   options: {
-    startIndex?: number;
+    skipMessages?: number;
     onAbort?: () => void;
     signal?: AbortSignal;
   } = {}
 ): ReadableStream<UIMessageChunk> {
-  const { startIndex = 0, onAbort, signal } = options;
-  let visibleCount = 0;
+  const { skipMessages = 0, onAbort, signal } = options;
+  let messageCount = 0; // Counts "start" chunks (message boundaries)
   let abortTimeout: NodeJS.Timeout | null = null;
   let terminated = false;
 
@@ -98,25 +98,27 @@ export function createAgentStream(
           abortTimeout = null;
         }
 
-        const isVisible = !chunk.type.endsWith(".ignore");
-        const shouldEnqueue = isVisible && visibleCount >= startIndex;
+        // Count message boundaries (start chunks)
+        if (chunk.type === "start") {
+          messageCount++;
+        }
 
-        if (isVisible) {
-          visibleCount++;
+        const isVisible = !chunk.type.endsWith(".ignore");
+        const shouldEnqueue = isVisible && messageCount > skipMessages;
+
+        // Set timeout on any finish chunk once we've reached/passed the skip threshold.
+        // This handles the case where we skip all messages and there's no new content.
+        if (chunk.type === "finish" && messageCount >= skipMessages) {
+          abortTimeout = setTimeout(() => {
+            if (terminated) return;
+            terminated = true;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            controller.enqueue({ type: "stream-done" } as any);
+            onAbort?.();
+          }, 500);
         }
 
         if (shouldEnqueue) {
-          // Only set finish timeout for chunks we're actually sending
-          if (chunk.type === "finish") {
-            abortTimeout = setTimeout(() => {
-              if (terminated) return;
-              terminated = true;
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              controller.enqueue({ type: "stream-done" } as any);
-              onAbort?.();
-            }, 500);
-          }
-
           controller.enqueue(chunk);
         }
       },

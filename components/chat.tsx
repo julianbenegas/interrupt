@@ -232,7 +232,9 @@ function useDurableChat({
   const router = useRouter();
   const [localMessages, setLocalMessages] = React.useState<UIMessage[]>([]);
   const [status, setStatus] = React.useState<ChatStatus>("ready");
-  const chunkCountRef = React.useRef(0);
+  const assistantMessageCountRef = React.useRef(
+    chat?.assistantMessages?.length ?? 0
+  );
   const messageIdCounterRef = React.useRef(0);
   const chatIdRef = React.useRef<string | null>(chat?.id ?? null);
   const runIdRef = React.useRef<string | null>(chat?.runId ?? null);
@@ -242,11 +244,7 @@ function useDurableChat({
   const processStream = React.useCallback(
     async (
       response: Response,
-      {
-        onNewMessage,
-      }: {
-        onNewMessage?: (chatId: string) => void;
-      } = {}
+      { onNewMessage }: { onNewMessage?: (chatId: string) => void } = {}
     ) => {
       const runId = response.headers.get("x-workflow-run-id");
       if (runId) {
@@ -261,7 +259,6 @@ function useDurableChat({
       const decoder = new TextDecoder();
       let buffer = "";
       let currentMessage: StreamingMessage | null = null;
-      let chunkIndex = 0;
 
       const flushCurrentMessage = () => {
         if (currentMessage) {
@@ -336,7 +333,6 @@ function useDurableChat({
               }
 
               const chunk = JSON.parse(jsonStr);
-              chunkIndex++;
 
               // Handle custom stream-done signal (not part of UIMessageChunk)
               if (chunk.type === "stream-done") {
@@ -380,6 +376,7 @@ function useDurableChat({
                 case "finish": {
                   flushCurrentMessage();
                   currentMessage = null;
+                  assistantMessageCountRef.current++;
                   break;
                 }
 
@@ -537,7 +534,6 @@ function useDurableChat({
         }
 
         flushCurrentMessage();
-        chunkCountRef.current += chunkIndex;
         setStatus("ready");
       } catch (error) {
         if ((error as Error).name === "AbortError") {
@@ -562,6 +558,38 @@ function useDurableChat({
 
     // Merge in local messages
     let indexToPlaceIn = 0;
+
+    if (chat?.assistantMessages) {
+      for (let i = 0; i < chat.assistantMessages.length; i++) {
+        const assistantMessage = chat.assistantMessages[i];
+        if (!assistantMessage || assistantMessage.role !== "assistant")
+          continue;
+
+        // Convert content to parts array
+        const content = assistantMessage.content;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const parts: any[] =
+          typeof content === "string"
+            ? [{ type: "text", text: content }]
+            : Array.isArray(content)
+            ? content
+            : [];
+
+        let placed = false;
+        while (!placed) {
+          if (!result[indexToPlaceIn]) {
+            result[indexToPlaceIn] = {
+              id: `assistant-${indexToPlaceIn}`,
+              role: "assistant",
+              parts,
+            };
+            placed = true;
+          }
+          indexToPlaceIn++;
+        }
+      }
+    }
+
     for (let i = 0; i < localMessages.length; i++) {
       const localMessage = localMessages[i];
       if (!localMessage) continue;
@@ -588,7 +616,7 @@ function useDurableChat({
     }
 
     return result;
-  }, [chat?.userMessages, localMessages]);
+  }, [chat?.userMessages, chat?.assistantMessages, localMessages]);
 
   const sendMessage = React.useCallback(
     async (message: PromptInputMessage) => {
@@ -615,7 +643,7 @@ function useDurableChat({
                 message: userMessage,
                 followUp: {
                   chatId: newChatId,
-                  streamStartIndex: chunkCountRef.current,
+                  skipMessages: assistantMessageCountRef.current,
                   userMessageIndex: messages.length,
                 },
               }
@@ -667,13 +695,19 @@ function useDurableChat({
     setStatus("submitted");
 
     try {
-      const response = await fetch(
+      const url = new URL(
         `/api/chat/${encodeURIComponent(runIdRef.current)}`,
-        {
-          method: "GET",
-          signal: abortControllerRef.current.signal,
-        }
+        window.location.origin
       );
+      url.searchParams.set(
+        "skipMessages",
+        String(assistantMessageCountRef.current)
+      );
+
+      const response = await fetch(url, {
+        method: "GET",
+        signal: abortControllerRef.current.signal,
+      });
 
       if (!response.ok) {
         if (response.status === 404) {

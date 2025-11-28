@@ -1,7 +1,10 @@
 import { agent, agentHook } from "@/agent";
 import { UIMessage } from "ai";
 import { getRun, start } from "workflow/api";
-import { createAgentStream, createGracefulStreamResponse } from "./agent-stream";
+import {
+  createAgentStream,
+  createGracefulStreamResponse,
+} from "./agent-stream";
 import { getModel } from "@/lib/models";
 import { redis, StoredChat } from "@/lib/redis";
 
@@ -11,7 +14,7 @@ export interface ChatRequest {
   followUp?: {
     chatId: string;
     userMessageIndex: number;
-    streamStartIndex: number;
+    skipMessages: number;
   };
   newChatId?: string;
 }
@@ -59,6 +62,7 @@ export async function POST(request: Request) {
         id: body.newChatId,
         runId,
         userMessages: [{ data: message, index: 0, author: "user" }],
+        assistantMessages: [],
       });
     } else {
       throw new Error("expected newChatId or followUp by this point");
@@ -69,9 +73,9 @@ export async function POST(request: Request) {
     }
 
     const run = getRun(runId);
-    const startIndex = followUp?.streamStartIndex ?? 0;
+    const skipMessages = followUp?.skipMessages ?? 0;
     const stream = createAgentStream(run.getReadable(), {
-      startIndex,
+      skipMessages,
       signal: request.signal,
     });
 
