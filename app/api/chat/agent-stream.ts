@@ -114,6 +114,7 @@ export function createAgentStream(
             terminated = true;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             controller.enqueue({ type: "stream-done" } as any);
+            stream.cancel().catch(() => {});
             onAbort?.();
           }, 500);
         }

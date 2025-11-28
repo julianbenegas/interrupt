@@ -1,4 +1,7 @@
-import { createAgentStream, createGracefulStreamResponse } from "../agent-stream";
+import {
+  createAgentStream,
+  createGracefulStreamResponse,
+} from "../agent-stream";
 import { getRun } from "workflow/api";
 
 export async function GET(
@@ -13,12 +16,14 @@ export async function GET(
 
   const run = getRun(runId);
 
+  console.time("run.status");
   try {
     await run.status;
   } catch (error) {
     console.error(error);
     return new Response("Run not found", { status: 404 });
   }
+  console.timeEnd("run.status");
 
   const stream = createAgentStream(run.getReadable(), {
     skipMessages,
