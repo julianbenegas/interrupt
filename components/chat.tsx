@@ -239,8 +239,6 @@ function useDurableChat({
   const abortControllerRef = React.useRef<AbortController | null>(null);
   const resumedStream = React.useRef(false);
 
-  console.log({ localMessages, chat });
-
   const processStream = React.useCallback(
     async (
       response: Response,
@@ -316,6 +314,7 @@ function useDurableChat({
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
 
+          let streamDone = false;
           for (const line of lines) {
             if (!line.trim()) continue;
 
@@ -325,7 +324,10 @@ function useDurableChat({
               // Handle different stream formats
               if (line.startsWith("data:")) {
                 jsonStr = line.slice(5).trim();
-                if (jsonStr === "[DONE]") continue;
+                if (jsonStr === "[DONE]") {
+                  streamDone = true;
+                  break;
+                }
               } else if (line.match(/^\d+:/)) {
                 // Data stream protocol: "0:", "2:", etc.
                 jsonStr = line.slice(line.indexOf(":") + 1);
@@ -333,8 +335,16 @@ function useDurableChat({
                 continue;
               }
 
-              const chunk = JSON.parse(jsonStr) as UIMessageChunk;
+              const chunk = JSON.parse(jsonStr);
               chunkIndex++;
+
+              // Handle custom stream-done signal (not part of UIMessageChunk)
+              if (chunk.type === "stream-done") {
+                streamDone = true;
+                break;
+              }
+
+              const typedChunk = chunk as UIMessageChunk;
 
               const updateLocalMessages = () => {
                 const msg = currentMessage;
@@ -357,7 +367,7 @@ function useDurableChat({
                 });
               };
 
-              switch (chunk.type) {
+              switch (typedChunk.type) {
                 // Message boundaries
                 case "start": {
                   startNewMessage();
@@ -376,13 +386,13 @@ function useDurableChat({
                 // Text
                 case "text-start": {
                   const msg = getCurrentMessage();
-                  msg.partIndex.set(`text-${chunk.id}`, msg.parts.length);
+                  msg.partIndex.set(`text-${typedChunk.id}`, msg.parts.length);
                   msg.parts.push({ type: "text", text: "" });
                   break;
                 }
                 case "text-delta": {
                   const msg = getCurrentMessage();
-                  const partKey = `text-${chunk.id}`;
+                  const partKey = `text-${typedChunk.id}`;
                   let partIdx = msg.partIndex.get(partKey);
                   if (partIdx === undefined) {
                     partIdx = msg.parts.length;
@@ -391,7 +401,7 @@ function useDurableChat({
                   }
                   const textPart = msg.parts[partIdx];
                   if (textPart?.type === "text") {
-                    textPart.text += chunk.delta;
+                    textPart.text += typedChunk.delta;
                   }
                   updateLocalMessages();
                   break;
@@ -400,13 +410,16 @@ function useDurableChat({
                 // Reasoning
                 case "reasoning-start": {
                   const msg = getCurrentMessage();
-                  msg.partIndex.set(`reasoning-${chunk.id}`, msg.parts.length);
+                  msg.partIndex.set(
+                    `reasoning-${typedChunk.id}`,
+                    msg.parts.length
+                  );
                   msg.parts.push({ type: "reasoning", text: "" });
                   break;
                 }
                 case "reasoning-delta": {
                   const msg = getCurrentMessage();
-                  const partKey = `reasoning-${chunk.id}`;
+                  const partKey = `reasoning-${typedChunk.id}`;
                   let partIdx = msg.partIndex.get(partKey);
                   if (partIdx === undefined) {
                     partIdx = msg.parts.length;
@@ -415,7 +428,7 @@ function useDurableChat({
                   }
                   const reasoningPart = msg.parts[partIdx];
                   if (reasoningPart?.type === "reasoning") {
-                    reasoningPart.text += chunk.delta;
+                    reasoningPart.text += typedChunk.delta;
                   }
                   updateLocalMessages();
                   break;
@@ -425,15 +438,15 @@ function useDurableChat({
                 case "tool-input-start": {
                   const msg = getCurrentMessage();
                   msg.partIndex.set(
-                    `tool-${chunk.toolCallId}`,
+                    `tool-${typedChunk.toolCallId}`,
                     msg.parts.length
                   );
                   msg.parts.push({
                     type: "tool-invocation",
                     toolInvocation: {
                       state: "partial-call",
-                      toolCallId: chunk.toolCallId,
-                      toolName: chunk.toolName,
+                      toolCallId: typedChunk.toolCallId,
+                      toolName: typedChunk.toolName,
                       args: {},
                     },
                   });
@@ -442,7 +455,7 @@ function useDurableChat({
                 }
                 case "tool-input-available": {
                   const msg = getCurrentMessage();
-                  const partKey = `tool-${chunk.toolCallId}`;
+                  const partKey = `tool-${typedChunk.toolCallId}`;
                   let partIdx = msg.partIndex.get(partKey);
                   if (partIdx === undefined) {
                     partIdx = msg.parts.length;
@@ -451,9 +464,9 @@ function useDurableChat({
                       type: "tool-invocation",
                       toolInvocation: {
                         state: "call",
-                        toolCallId: chunk.toolCallId,
-                        toolName: chunk.toolName,
-                        args: chunk.input,
+                        toolCallId: typedChunk.toolCallId,
+                        toolName: typedChunk.toolName,
+                        args: typedChunk.input,
                       },
                     });
                   } else {
@@ -461,9 +474,9 @@ function useDurableChat({
                     if (toolPart?.type === "tool-invocation") {
                       toolPart.toolInvocation = {
                         state: "call",
-                        toolCallId: chunk.toolCallId,
-                        toolName: chunk.toolName,
-                        args: chunk.input,
+                        toolCallId: typedChunk.toolCallId,
+                        toolName: typedChunk.toolName,
+                        args: typedChunk.input,
                       };
                     }
                   }
@@ -472,7 +485,7 @@ function useDurableChat({
                 }
                 case "tool-output-available": {
                   const msg = getCurrentMessage();
-                  const partKey = `tool-${chunk.toolCallId}`;
+                  const partKey = `tool-${typedChunk.toolCallId}`;
                   const partIdx = msg.partIndex.get(partKey);
                   if (partIdx !== undefined) {
                     const toolPart = msg.parts[partIdx];
@@ -480,7 +493,7 @@ function useDurableChat({
                       toolPart.toolInvocation = {
                         ...toolPart.toolInvocation,
                         state: "result",
-                        result: chunk.output,
+                        result: typedChunk.output,
                       };
                     }
                   }
@@ -493,9 +506,9 @@ function useDurableChat({
                   const msg = getCurrentMessage();
                   msg.parts.push({
                     type: "source-url",
-                    sourceId: chunk.sourceId,
-                    url: chunk.url,
-                    title: chunk.title,
+                    sourceId: typedChunk.sourceId,
+                    url: typedChunk.url,
+                    title: typedChunk.title,
                   });
                   updateLocalMessages();
                   break;
@@ -515,10 +528,12 @@ function useDurableChat({
                   // Unknown chunk type - ignore
                   break;
               }
+              if (streamDone) break;
             } catch {
               // skip malformed chunks
             }
           }
+          if (streamDone) break;
         }
 
         flushCurrentMessage();

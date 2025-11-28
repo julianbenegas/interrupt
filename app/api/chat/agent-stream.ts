@@ -27,7 +27,9 @@ export function createAgentStream(
           abortTimeout = setTimeout(() => {
             if (terminated) return;
             terminated = true;
-            controller.terminate();
+            // Send a custom "done" signal instead of terminating
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            controller.enqueue({ type: "stream-done" } as any);
             onAbort?.();
           }, 500);
         }
@@ -38,6 +40,16 @@ export function createAgentStream(
           }
           visibleCount++;
         }
+      },
+      flush() {
+        // Stream closed naturally - cancel the timeout to prevent enqueue on closed stream
+        if (abortTimeout) {
+          clearTimeout(abortTimeout);
+          abortTimeout = null;
+        }
+        if (terminated) return;
+        terminated = true;
+        onAbort?.();
       },
     })
   );
