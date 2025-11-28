@@ -51,6 +51,7 @@ import { useRouter } from "next/navigation";
 import { ChatRequest } from "@/app/api/chat/route";
 import { models } from "@/lib/models";
 import type { UIMessage, UIMessageChunk } from "ai";
+import { nanoid } from "nanoid";
 
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
@@ -645,12 +646,12 @@ function useDurableChat({
       abortControllerRef.current?.abort();
       abortControllerRef.current = new AbortController();
 
-      const newChatId = chatIdRef.current ?? crypto.randomUUID();
+      const newChatId = chatIdRef.current ?? nanoid();
       const isNewChat = !chatIdRef.current;
       chatIdRef.current = newChatId;
 
       const userMessage: UIMessage = {
-        id: crypto.randomUUID(),
+        id: nanoid(),
         role: "user",
         parts: [{ type: "text", text: message.text ?? "" }],
       };
