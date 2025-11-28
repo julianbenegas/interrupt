@@ -92,27 +92,32 @@ export function createAgentStream(
   return stream.pipeThrough(
     new TransformStream<UIMessageChunk, UIMessageChunk>({
       transform(chunk, controller) {
-        if (abortTimeout) {
-          clearTimeout(abortTimeout);
-          abortTimeout = null;
-        }
+        // Only process chunks that aren't being skipped
+        const isVisible = !chunk.type.endsWith(".ignore");
+        const shouldEnqueue = isVisible && visibleCount >= startIndex;
 
-        if (chunk.type === "finish") {
-          abortTimeout = setTimeout(() => {
-            if (terminated) return;
-            terminated = true;
-            // Send a custom "done" signal instead of terminating
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            controller.enqueue({ type: "stream-done" } as any);
-            onAbort?.();
-          }, 500);
-        }
-
-        if (chunk.type.endsWith(".ignore") === false) {
-          if (visibleCount >= startIndex) {
-            controller.enqueue(chunk);
-          }
+        if (isVisible) {
           visibleCount++;
+        }
+
+        // Only handle finish/timeout logic for chunks we're actually sending
+        if (shouldEnqueue) {
+          if (abortTimeout) {
+            clearTimeout(abortTimeout);
+            abortTimeout = null;
+          }
+
+          if (chunk.type === "finish") {
+            abortTimeout = setTimeout(() => {
+              if (terminated) return;
+              terminated = true;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              controller.enqueue({ type: "stream-done" } as any);
+              onAbort?.();
+            }, 500);
+          }
+
+          controller.enqueue(chunk);
         }
       },
       flush() {
