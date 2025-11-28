@@ -1,4 +1,6 @@
 "use client";
+import * as React from "react";
+import { WorkflowChatTransport } from "@workflow/ai";
 import {
   Conversation,
   ConversationContent,
@@ -32,7 +34,6 @@ import {
   PromptInputFooter,
   PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
-import { useState } from "react";
 import { useChat } from "@ai-sdk/react";
 import { CopyIcon, RefreshCcwIcon } from "lucide-react";
 import {
@@ -54,10 +55,13 @@ import { ChatRequest } from "@/app/api/chat/route";
 import { models } from "@/lib/models";
 
 export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
-  const [input, setInput] = useState("");
-  const [model, setModel] = useState<string>(models[0].value);
-  const { messages, sendMessage, status, regenerate } = useChat();
+  const [input, setInput] = React.useState("");
+  const [model, setModel] = React.useState<string>(models[0].value);
   const router = useRouter();
+  const { sendMessage, regenerate, messages, status } = useDurableChat({
+    chat,
+    model,
+  });
 
   const handleSubmit = async (message: PromptInputMessage) => {
     const hasText = Boolean(message.text);
@@ -221,3 +225,47 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
     </div>
   );
 };
+
+function useDurableChat({
+  chat,
+  model,
+}: {
+  chat?: StoredChatClient;
+  model: string;
+}) {
+  const [chunkCount, setChunkCount] = React.useState(0);
+
+  const { sendMessage, regenerate, messages, status } = useChat({
+    id: chat?.id,
+    transport: new WorkflowChatTransport({
+      api: chat ? `/api/chat/${encodeURIComponent(chat.runId)}` : "/api/chat",
+      prepareSendMessagesRequest: (config) => {
+        console.log("prepareSendMessagesRequest", config);
+        const message = config.messages.at(-1);
+        if (!message) {
+          throw new Error("No message provided");
+        }
+        if (message.role !== "user") {
+          throw new Error("Last message must be a user message");
+        }
+        return {
+          ...config,
+          body: (chat
+            ? { message, followUp: { chatId: chat.id } }
+            : { message, model, newChatId: nanoid() }) satisfies ChatRequest,
+        };
+      },
+      prepareReconnectToStreamRequest: (config) => ({
+        ...config,
+        api: chat ? `/api/chat/${encodeURIComponent(chat.runId)}` : "/api/chat",
+      }),
+      onChatEnd: ({ chunkIndex }) => {
+        setChunkCount((prev) => prev + chunkIndex);
+        // setIsInterrupting(false);
+      },
+      maxConsecutiveErrors: 5,
+    }),
+  });
+
+  return { sendMessage, regenerate, messages, status };
+}
