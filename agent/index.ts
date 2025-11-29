@@ -112,7 +112,6 @@ async function streamTextStep({
           await redis.set<StoredChat>(`chat:${chatId}`, {
             ...chat,
             messages: uiMessages,
-            streamId: null,
           });
         },
       })
@@ -121,5 +120,12 @@ async function streamTextStep({
     finishReason = await result.finishReason;
   }
 
-  await writable.close();
+  await Promise.all([
+    writable.close(),
+    redis.set<StoredChat>(`chat:${chatId}`, {
+      ...chat,
+      messages: uiMessages,
+      streamId: null,
+    }),
+  ]);
 }
