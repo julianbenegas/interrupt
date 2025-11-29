@@ -3,17 +3,15 @@ import { NextRequest } from "next/server";
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ runId: string }> }
+  { params }: { params: Promise<{ chatId: string }> }
 ) {
   try {
-    const body = await request.json();
-    const { chatId } = body;
+    const { chatId } = await params;
     if (!chatId) {
       return new Response("Missing chatId", { status: 400 });
     }
     const chat = await redis.get<StoredChat>(`chat:${chatId}`);
-    const { runId } = await params;
-    if (!chat || chat.runId !== runId) {
+    if (!chat) {
       return new Response("Chat not found", { status: 404 });
     }
     await redis.set<StoredInterrupt>(`interrupt:${chat.id}`, {

@@ -1,5 +1,5 @@
 import { Redis } from "@upstash/redis";
-import { ModelMessage, UIMessage } from "ai";
+import { UIMessage } from "ai";
 
 export const redis = Redis.fromEnv();
 
@@ -8,27 +8,21 @@ export const redis = Redis.fromEnv();
 export type StoredChat = {
   id: string;
   runId: string;
-  userMessages: { data: UIMessage; index: number; author: string }[];
-  assistantMessages: ModelMessage[];
-  /** Index of the message currently being streamed, or null if idle */
-  streamingMessageIndex: number | null;
+  messages: UIMessage[];
+  /** Stream ID (timestamp) currently being streamed, or null if idle */
+  streamId: string | null;
 };
 
 export type StoredChatClient = Pick<
   StoredChat,
-  | "id"
-  | "runId"
-  | "userMessages"
-  | "assistantMessages"
-  | "streamingMessageIndex"
+  "id" | "runId" | "messages" | "streamId"
 >;
 export function toClientStoredChat(chat: StoredChat): StoredChatClient {
   return {
     id: chat.id,
     runId: chat.runId,
-    userMessages: chat.userMessages,
-    assistantMessages: chat.assistantMessages,
-    streamingMessageIndex: chat.streamingMessageIndex,
+    messages: chat.messages,
+    streamId: chat.streamId,
   };
 }
 
