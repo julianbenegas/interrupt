@@ -251,9 +251,7 @@ function useDurableChat({
   const toSendRef = React.useRef<Array<UIMessage>>([]);
 
   const existingChatId = chat?.id;
-  const api = existingChatId
-    ? `/api/chat/${encodeURIComponent(existingChatId)}`
-    : "/api/chat";
+  const api = existingChatId ? `/api/chat/${existingChatId}` : "/api/chat";
 
   const {
     messages: streamMessages,
@@ -284,7 +282,7 @@ function useDurableChat({
       prepareReconnectToStreamRequest: (config) => ({ ...config, api }),
       onChatSendMessage: () => {
         if (!existingChatId) {
-          router.push(`/${chatId}`);
+          router.push(`/chat/${chatId}`);
         }
       },
       maxConsecutiveErrors: 5,
@@ -323,7 +321,7 @@ function useDurableChat({
       }
       if (!existingChatId) throw new Error("Expected chat to be defined");
       setQueue((curr) => [...curr, ...newMessages]);
-      await fetch(`/api/chat/${encodeURIComponent(existingChatId)}/interrupt`, {
+      await fetch(`/api/chat/${existingChatId}/interrupt`, {
         method: "POST",
         body: JSON.stringify({}),
       });
