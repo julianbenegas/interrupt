@@ -80,52 +80,59 @@ async function onAgentEvent(
   let finishReason: FinishReason | undefined = undefined;
   let stepCount = 0;
 
-  const agent = new DurableAgent({
-    model,
-    system: "you're a good bot. just chat and have fun.",
-    tools: getTools(),
-  });
-
   messages.push(...convertToModelMessages([event.message]));
   setMessages(messages);
 
-  while (finishReason !== "stop" && stepCount < 100) {
-    stepCount++;
+  const interrupted = await hasInterruptStep({
+    chatId,
+    since: event.now,
+  });
 
-    const { messages: latestMessages } = await agent.stream({
-      messages,
-      writable,
-      preventClose: true,
-      sendFinish: false,
-      stopWhen: stepCountIs(1),
-      onStepFinish: ({ finishReason: reason }) => {
-        finishReason = reason;
-      },
+  if (!interrupted) {
+    const agent = new DurableAgent({
+      model,
+      system: "you're a good bot. just chat and have fun.",
+      tools: getTools(),
     });
 
-    messages = latestMessages.filter((m) => m.role !== "system");
-    setMessages(messages);
+    while (finishReason !== "stop" && stepCount < 100) {
+      stepCount++;
 
-    const interrupted = await hasInterruptStep({
-      chatId,
-      since: event.now,
-    });
-    if (interrupted) {
-      messages = await sendInterruptionMessageStep({
+      const { messages: latestMessages } = await agent.stream({
         messages,
         writable,
-        now: event.now,
-        stepCount,
+        preventClose: true,
+        sendFinish: false,
+        stopWhen: stepCountIs(1),
+        onStepFinish: ({ finishReason: reason }) => {
+          finishReason = reason;
+        },
       });
-      setMessages(messages);
-      break;
-    }
-  }
 
-  await Promise.all([
-    sendFinishMessageStep({ writable }),
-    storeAssistantMessagesStep({ chatId, messages }),
-  ]);
+      messages = latestMessages.filter((m) => m.role !== "system");
+      setMessages(messages);
+
+      const interrupted = await hasInterruptStep({
+        chatId,
+        since: event.now,
+      });
+      if (interrupted) {
+        messages = await sendInterruptionMessageStep({
+          messages,
+          writable,
+          now: event.now,
+          stepCount,
+        });
+        setMessages(messages);
+        break;
+      }
+    }
+
+    await Promise.all([
+      sendFinishMessageStep({ writable }),
+      storeAssistantMessagesStep({ chatId, messages }),
+    ]);
+  }
 }
 
 async function hasInterruptStep({
