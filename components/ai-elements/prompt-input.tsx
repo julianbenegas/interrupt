@@ -612,6 +612,7 @@ export const PromptInput = ({
     const onDrop = (e: DragEvent) => {
       if (e.dataTransfer?.types?.includes("Files")) {
         e.preventDefault();
+        e.stopPropagation(); // Prevent document handler from also firing
       }
       if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
         add(e.dataTransfer.files);
@@ -780,7 +781,9 @@ export const PromptInput = ({
         ref={formRef}
         {...props}
       >
-        <InputGroup className="overflow-hidden">{children}</InputGroup>
+        <InputGroup className="overflow-hidden bg-background">
+          {children}
+        </InputGroup>
       </form>
     </>
   );
