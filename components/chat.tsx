@@ -113,7 +113,7 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
       <div className="flex flex-col h-full">
         <Conversation className="h-full">
           <ConversationContent>
-            <Container className="pb-64">
+            <Container className="pb-64 space-y-8">
               {/* Empty state */}
               {messages.length === 0 && status === "ready" && (
                 <div className="flex flex-col items-start justify-center pt-16 px-4">
