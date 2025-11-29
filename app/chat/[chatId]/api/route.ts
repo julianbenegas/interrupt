@@ -1,18 +1,40 @@
-import { agent, agentHook } from "@/agent";
 import { createUIMessageStreamResponse, UIMessage } from "ai";
 import { getRun, start } from "workflow/api";
-import { getModel } from "@/lib/models";
 import { redis, StoredChat } from "@/lib/redis";
+import { agent, agentHook } from "@/agent";
+import { getModel } from "@/lib/models";
+
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ chatId: string }> }
+) {
+  const { chatId } = await params;
+
+  if (!chatId) {
+    return new Response("chatId is required", { status: 400 });
+  }
+
+  const chat = await redis.get<StoredChat>(`chat:${chatId}`);
+  if (!chat || !chat.streamId) {
+    return new Response("No active stream", { status: 404 });
+  }
+
+  const run = getRun(chat.runId);
+
+  return createUIMessageStreamResponse({
+    stream: run.getReadable({ namespace: chat.streamId }),
+    headers: { "x-workflow-run-id": chat.runId },
+  });
+}
 
 export interface ChatRequest {
   messages: UIMessage[];
   model?: string;
-  newChatId?: string;
 }
 
 export async function POST(
   request: Request,
-  { params }: { params?: Promise<{ chatId?: string }> }
+  { params }: { params: Promise<{ chatId: string }> }
 ) {
   try {
     const body: ChatRequest = await request.json();
@@ -21,16 +43,21 @@ export async function POST(
     const now = Date.now();
     const streamId = String(now);
 
-    const { chatId: existingChatId } = (await params) ?? {};
+    const { chatId } = (await params) ?? {};
+
+    if (chatId.length > 32) {
+      return new Response("Invalid chatId", { status: 400 });
+    }
+
+    const chat = await redis.get<StoredChat>(`chat:${chatId}`);
 
     let runId: string | undefined;
-    if (existingChatId) {
-      const chat = await redis.get<StoredChat>(`chat:${existingChatId}`);
+    if (chat) {
       if (!chat) {
         return new Response("Chat not found", { status: 404 });
       }
 
-      const hook = await agentHook.resume(existingChatId, {
+      const hook = await agentHook.resume(chat.id, {
         type: "user-message",
         now,
       });
@@ -44,24 +71,21 @@ export async function POST(
         messages: [...chat.messages, ...messages],
         streamId,
       });
-    } else if (body.newChatId) {
-      console.log("starting...", body.newChatId);
+    } else {
       const run = await start(agent, [
         {
-          chatId: body.newChatId,
+          chatId,
           initialEvent: { type: "user-message", now },
           model: getModel(body.model).value,
         },
       ]);
       runId = run.runId;
-      await redis.set<StoredChat>(`chat:${body.newChatId}`, {
-        id: body.newChatId,
+      await redis.set<StoredChat>(`chat:${chatId}`, {
+        id: chatId,
         runId,
         messages,
         streamId,
       });
-    } else {
-      throw new Error("expected newChatId or followUp by this point");
     }
 
     if (!runId) {

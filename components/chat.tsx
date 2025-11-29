@@ -50,7 +50,7 @@ import {
 import { Loader } from "@/components/ai-elements/loader";
 import { StoredChatClient } from "@/lib/redis";
 import { useRouter } from "next/navigation";
-import { ChatRequest } from "@/app/api/chat/route";
+import { ChatRequest } from "@/app/chat/[chatId]/api/route";
 import { models } from "@/lib/models";
 import { nanoid } from "nanoid";
 import { FilePart } from "ai";
@@ -243,45 +243,43 @@ function useDurableChat({
   chat?: StoredChatClient;
   model: string;
 }) {
-  const router = useRouter();
-  const [resumed, setResumed] = React.useState(false);
+  const resumedRef = React.useRef(false);
   const [queue, setQueue] = React.useState<
     Array<Omit<UIMessage, "id" | "role">>
   >([]);
   const toSendRef = React.useRef<Array<UIMessage>>([]);
-
-  const existingChatId = chat?.id;
-  const api = existingChatId ? `/api/chat/${existingChatId}` : "/api/chat";
+  const chatId = React.useMemo(() => chat?.id || nanoid(), [chat?.id]);
+  const router = useRouter();
+  const isNewChat = !chat?.id;
 
   const {
     messages: streamMessages,
     resumeStream,
     sendMessage: sendMessageRaw,
     status,
-    id: chatId,
     setMessages,
   } = useChat({
-    id: existingChatId,
+    id: chatId,
     // eslint-disable-next-line react-hooks/refs
     transport: new WorkflowChatTransport({
-      api,
       prepareSendMessagesRequest: (config) => {
         const newMessages = toSendRef.current;
         toSendRef.current = [];
         return {
           ...config,
-          body: existingChatId
-            ? { messages: newMessages, model }
-            : ({
-                model,
-                messages: newMessages,
-                newChatId: config.id,
-              } satisfies ChatRequest),
+          api: `/chat/${config.id}/api`,
+          body: {
+            model,
+            messages: newMessages,
+          } satisfies ChatRequest,
         };
       },
-      prepareReconnectToStreamRequest: (config) => ({ ...config, api }),
+      prepareReconnectToStreamRequest: (config) => ({
+        ...config,
+        api: `/chat/${config.id}/api`,
+      }),
       onChatSendMessage: () => {
-        if (!existingChatId) {
+        if (isNewChat) {
           router.push(`/chat/${chatId}`);
         }
       },
@@ -290,12 +288,11 @@ function useDurableChat({
   });
 
   React.useEffect(() => {
-    if (chat?.streamId && !resumed && status === "ready") {
-      console.log({ status });
-      setResumed(true);
+    if (chat?.streamId && !resumedRef.current && status === "ready") {
+      resumedRef.current = true;
       resumeStream();
     }
-  }, [chat?.streamId, resumeStream, resumed, status]);
+  }, [chat?.streamId, resumeStream, status]);
 
   const messages = React.useMemo(() => {
     return [...(chat?.messages ?? []), ...streamMessages];
@@ -319,14 +316,13 @@ function useDurableChat({
         await sendMessageRaw();
         return;
       }
-      if (!existingChatId) throw new Error("Expected chat to be defined");
       setQueue((curr) => [...curr, ...newMessages]);
-      await fetch(`/api/chat/${existingChatId}/interrupt`, {
+      await fetch(`/chat/${chatId}/api/interrupt`, {
         method: "POST",
         body: JSON.stringify({}),
       });
     },
-    [existingChatId, sendMessageRaw, status, setMessages]
+    [chatId, sendMessageRaw, status, setMessages]
   );
 
   React.useEffect(() => {
