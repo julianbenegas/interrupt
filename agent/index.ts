@@ -90,6 +90,11 @@ async function streamTextStep({
       writer.write({ id, type: "text-delta", delta: message });
       writer.write({ id, type: "text-end" });
       writer.releaseLock();
+      uiMessages.push({
+        id,
+        role: "assistant",
+        parts: [{ type: "text", text: message }],
+      });
       break;
     }
 
