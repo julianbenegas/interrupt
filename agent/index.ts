@@ -75,11 +75,6 @@ async function onAgentEvent(
     messageIndex: number;
   }
 ) {
-  const writable = getWritable({ namespace: String(messageIndex) });
-
-  let finishReason: FinishReason | undefined = undefined;
-  let stepCount = 0;
-
   messages.push(...convertToModelMessages([event.message]));
   setMessages(messages);
 
@@ -89,6 +84,11 @@ async function onAgentEvent(
   });
 
   if (!interrupted) {
+    const writable = getWritable({ namespace: String(messageIndex) });
+
+    let finishReason: FinishReason | undefined = undefined;
+    let stepCount = 0;
+
     const agent = new DurableAgent({
       model,
       system: "you're a good bot. just chat and have fun.",
