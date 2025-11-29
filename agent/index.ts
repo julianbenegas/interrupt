@@ -38,11 +38,17 @@ async function onAgentEvent(
   { chatId, model }: { chatId: string; model: string }
 ) {
   const streamId = String(event.now);
-  const interrupted = await hasInterruptStep({ chatId, since: event.now });
+  const writable = getWritable({ namespace: streamId });
+
+  const interrupted = await hasInterruptStep({
+    chatId,
+    since: event.now,
+  });
 
   if (!interrupted) {
-    const writable = getWritable({ namespace: streamId });
     await streamTextStep({ model, chatId, writable, now: event.now });
+  } else {
+    await closeStreamStep({ writable, chatId });
   }
 }
 
@@ -52,11 +58,32 @@ async function hasInterruptStep({
 }: {
   chatId: string;
   since: number;
-}) {
+}): Promise<boolean> {
   "use step";
   const interrupt = await redis.get<StoredInterrupt>(`interrupt:${chatId}`);
   if (!interrupt || interrupt.timestamp < since) return false;
   return true;
+}
+
+async function closeStreamStep({
+  writable,
+  chatId,
+}: {
+  writable: WritableStream<UIMessageChunk>;
+  chatId: string;
+}) {
+  "use step";
+  await Promise.all([
+    writable.close(),
+    redis.get<StoredChat>(`chat:${chatId}`).then(async (chat) => {
+      if (chat?.streamId) {
+        await redis.set<StoredChat>(`chat:${chatId}`, {
+          ...chat,
+          streamId: null,
+        });
+      }
+    }),
+  ]);
 }
 
 async function streamTextStep({

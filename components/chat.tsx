@@ -60,6 +60,7 @@ import { models } from "@/lib/models";
 import { nanoid } from "nanoid";
 import { FilePart } from "ai";
 import { cn } from "@/lib/utils";
+import { InterruptRequest } from "@/app/chat/[chatId]/api/interrupt/route";
 
 export type ChatStatus = "submitted" | "streaming" | "ready" | "error";
 
@@ -382,6 +383,8 @@ function useDurableChat({
           body: {
             model,
             messages: newMessages,
+            // eslint-disable-next-line react-hooks/purity -- wtf
+            now: Date.now(),
           } satisfies ChatRequest,
         };
       },
@@ -451,7 +454,7 @@ function useDurableChat({
       setQueue((curr) => [...curr, ...newMessages]);
       await fetch(`/chat/${chatId}/api/interrupt`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify({ now: Date.now() } satisfies InterruptRequest),
       });
     },
     [chatId, sendMessageRaw, status, setMessages]

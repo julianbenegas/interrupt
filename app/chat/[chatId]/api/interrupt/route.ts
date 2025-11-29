@@ -1,6 +1,10 @@
 import { redis, StoredChat, StoredInterrupt } from "@/lib/redis";
 import { NextRequest } from "next/server";
 
+export interface InterruptRequest {
+  now: number;
+}
+
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ chatId: string }> }
@@ -14,8 +18,9 @@ export async function POST(
     if (!chat) {
       return new Response("Chat not found", { status: 404 });
     }
+    const body: InterruptRequest = await request.json();
     await redis.set<StoredInterrupt>(`interrupt:${chat.id}`, {
-      timestamp: Date.now(),
+      timestamp: body.now,
     });
 
     return new Response(null, { status: 200 });

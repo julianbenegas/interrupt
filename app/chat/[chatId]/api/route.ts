@@ -29,6 +29,7 @@ export async function GET(
 
 export interface ChatRequest {
   messages: UIMessage[];
+  now: number;
   model?: string;
 }
 
