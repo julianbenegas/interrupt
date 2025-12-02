@@ -1,6 +1,12 @@
 import { createUIMessageStreamResponse, UIMessage } from "ai";
 import { getRun, start } from "workflow/api";
-import { redis, StoredChat } from "@/lib/redis";
+import {
+  redis,
+  StoredChat,
+  pushMessages,
+  setStreamId,
+  getStreamId,
+} from "@/lib/redis";
 import { agent, agentHook } from "@/agent";
 import { getModel } from "@/lib/models";
 
@@ -14,15 +20,18 @@ export async function GET(
     return new Response("chatId is required", { status: 400 });
   }
 
-  const chat = await redis.get<StoredChat>(`chat:${chatId}`);
-  if (!chat || !chat.streamId) {
+  const [chat, streamId] = await Promise.all([
+    redis.get<StoredChat>(`chat:${chatId}`),
+    getStreamId(chatId),
+  ]);
+  if (!chat || !streamId) {
     return new Response("No active stream", { status: 404 });
   }
 
   const run = getRun(chat.runId);
 
   return createUIMessageStreamResponse({
-    stream: run.getReadable({ namespace: chat.streamId }),
+    stream: run.getReadable({ namespace: streamId }),
     headers: { "x-workflow-run-id": chat.runId },
   });
 }
@@ -58,20 +67,19 @@ export async function POST(
         return new Response("Chat not found", { status: 404 });
       }
 
-      const hook = await agentHook.resume(chat.id, {
-        type: "user-message",
-        now,
-      });
+      const [hook] = await Promise.all([
+        agentHook.resume(chat.id, {
+          type: "user-message",
+          now,
+        }),
+        setStreamId(chat.id, streamId),
+        pushMessages(chat.id, messages),
+      ]);
 
       if (!hook) {
         return new Response("No active workflow found", { status: 404 });
       }
       runId = hook.runId;
-      await redis.set<StoredChat>(`chat:${chat.id}`, {
-        ...chat,
-        messages: [...chat.messages, ...messages],
-        streamId,
-      });
     } else {
       const run = await start(agent, [
         {
@@ -81,12 +89,14 @@ export async function POST(
         },
       ]);
       runId = run.runId;
-      await redis.set<StoredChat>(`chat:${chatId}`, {
-        id: chatId,
-        runId,
-        messages,
-        streamId,
-      });
+      await Promise.all([
+        redis.set<StoredChat>(`chat:${chatId}`, {
+          id: chatId,
+          runId,
+        }),
+        setStreamId(chatId, streamId),
+        pushMessages(chatId, messages),
+      ]);
     }
 
     if (!runId) {

@@ -97,7 +97,10 @@ export const Chat = ({ chat }: { chat?: StoredChatClient }) => {
   React.useEffect(() => {
     const regularCharacterRegex = /^[a-zA-Z0-9]$/;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (regularCharacterRegex.test(e.key)) {
+      // Only proceed if key is a regular character and no modifier (shortcut) keys are pressed
+      const noModifier = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      if (regularCharacterRegex.test(e.key) && noModifier) {
+        console.log(noModifier, e);
         const textarea =
           promptInputContainerRef.current?.querySelector("textarea");
         if (textarea && document.activeElement !== textarea) {

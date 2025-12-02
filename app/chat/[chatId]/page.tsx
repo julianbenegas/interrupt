@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 import { Chat } from "@/components/chat";
-import { redis, StoredChat, toClientStoredChat } from "@/lib/redis";
+import { redis, StoredChat, getMessages, getStreamId } from "@/lib/redis";
 
 export default async function ChatPage({
   params,
@@ -10,9 +10,22 @@ export default async function ChatPage({
   const { chatId } = await params;
   if (!chatId) notFound();
 
-  const chat = await redis.get<StoredChat>(`chat:${chatId}`);
+  const [chat, messages, streamId] = await Promise.all([
+    redis.get<StoredChat>(`chat:${chatId}`),
+    getMessages(chatId),
+    getStreamId(chatId),
+  ]);
 
   if (!chat) notFound();
 
-  return <Chat chat={toClientStoredChat(chat)} />;
+  return (
+    <Chat
+      chat={{
+        id: chat.id,
+        runId: chat.runId,
+        streamId,
+        messages,
+      }}
+    />
+  );
 }

@@ -6,8 +6,19 @@ import {
 } from "ai";
 import { defineHook, getWritable } from "workflow";
 import { getTools } from "./tools";
-import { redis, StoredChat, StoredInterrupt } from "@/lib/redis";
+import {
+  redis,
+  StoredInterrupt,
+  pushMessages,
+  getMessages,
+  clearStreamIdIf,
+} from "@/lib/redis";
 import { nanoid } from "nanoid";
+
+type FinishReasonWithInterrupt =
+  | FinishReason
+  | "interrupted-mid-stream"
+  | "interrupted-before-stream";
 
 export type AgentEvent = { now: number } & { type: "user-message" };
 
@@ -40,16 +51,38 @@ async function onAgentEvent(
   const streamId = String(event.now);
   const writable = getWritable({ namespace: streamId });
 
-  const interrupted = await hasInterruptStep({
+  const interruptedBeforeStream = await hasInterruptStep({
     chatId,
     since: event.now,
   });
 
-  if (!interrupted) {
-    await streamTextStep({ model, chatId, writable, now: event.now });
-  } else {
-    await closeStreamStep({ writable, chatId });
+  let finishReason: FinishReasonWithInterrupt | undefined;
+  if (!interruptedBeforeStream) {
+    let stepCount = 0;
+    while (
+      finishReason !== "stop" &&
+      finishReason !== "interrupted-mid-stream" &&
+      finishReason !== "interrupted-before-stream" &&
+      stepCount < 100
+    ) {
+      const result = await streamTextStep({
+        model,
+        chatId,
+        writable,
+        now: event.now,
+        stepCount,
+      });
+      finishReason = result.finishReason;
+      stepCount++;
+    }
   }
+
+  await closeStreamStep({
+    writable,
+    chatId,
+    now: event.now,
+    writeInterruptionMessage: finishReason === "interrupted-mid-stream",
+  });
 }
 
 async function hasInterruptStep({
@@ -68,21 +101,42 @@ async function hasInterruptStep({
 async function closeStreamStep({
   writable,
   chatId,
+  writeInterruptionMessage,
+  now,
 }: {
   writable: WritableStream<UIMessageChunk>;
   chatId: string;
+  writeInterruptionMessage?: boolean;
+  now: number;
 }) {
   "use step";
+
+  const interruptionMessageId = `interruption-${now}`;
+  const interruptionMessage = "[interrupted by user]";
+  if (writeInterruptionMessage) {
+    const writer = writable.getWriter();
+    writer.write({ id: interruptionMessageId, type: "text-start" });
+    writer.write({
+      id: interruptionMessageId,
+      type: "text-delta",
+      delta: interruptionMessage,
+    });
+    writer.write({ id: interruptionMessageId, type: "text-end" });
+    writer.releaseLock();
+  }
+
   await Promise.all([
     writable.close(),
-    redis.get<StoredChat>(`chat:${chatId}`).then(async (chat) => {
-      if (chat?.streamId) {
-        await redis.set<StoredChat>(`chat:${chatId}`, {
-          ...chat,
-          streamId: null,
-        });
-      }
-    }),
+    writeInterruptionMessage
+      ? pushMessages(chatId, [
+          {
+            id: interruptionMessageId,
+            role: "assistant" as const,
+            parts: [{ type: "text" as const, text: interruptionMessage }],
+          },
+        ])
+      : Promise.resolve(),
+    clearStreamIdIf(chatId, String(now)),
   ]);
 }
 
@@ -91,73 +145,44 @@ async function streamTextStep({
   chatId,
   writable,
   now,
+  stepCount,
 }: {
   model: string;
   chatId: string;
   writable: WritableStream<UIMessageChunk>;
   now: number;
-}) {
+  stepCount: number;
+}): Promise<{ finishReason: FinishReasonWithInterrupt }> {
   "use step";
 
-  const chat = await redis.get<StoredChat>(`chat:${chatId}`);
-  if (!chat) {
-    throw new Error("Chat not found");
-  }
-  let uiMessages = chat.messages;
-
-  let finishReason: FinishReason | undefined;
-  let stepCount = 0;
-  while (finishReason !== "stop" && stepCount < 100) {
-    const interrupted = await hasInterruptStep({ chatId, since: now });
-    if (interrupted) {
-      const message = "[interrupted by user]";
-      const writer = writable.getWriter();
-      const id = `interruption-${now}`;
-      writer.write({ id, type: "text-start" });
-      writer.write({ id, type: "text-delta", delta: message });
-      writer.write({ id, type: "text-end" });
-      writer.releaseLock();
-      uiMessages.push({
-        id,
-        role: "assistant",
-        parts: [{ type: "text", text: message }],
-      });
-      break;
-    }
-
-    stepCount++;
-
-    const result = streamText({
-      messages: convertToModelMessages(uiMessages),
-      tools: getTools(),
-      system: "you're a good bot. just chat and have fun.",
-      model,
-    });
-
-    await result
-      .toUIMessageStream({
-        onFinish: async ({ messages: newMessages }) => {
-          uiMessages = [
-            ...uiMessages,
-            ...newMessages.map((m) => ({ ...m, id: m.id || nanoid() })),
-          ];
-          await redis.set<StoredChat>(`chat:${chatId}`, {
-            ...chat,
-            messages: uiMessages,
-          });
-        },
-      })
-      .pipeTo(writable, { preventClose: true });
-
-    finishReason = await result.finishReason;
-  }
-
-  await Promise.all([
-    writable.close(),
-    redis.set<StoredChat>(`chat:${chatId}`, {
-      ...chat,
-      messages: uiMessages,
-      streamId: null,
-    }),
+  const [uiMessages, interrupted] = await Promise.all([
+    getMessages(chatId),
+    hasInterruptStep({ chatId, since: now }),
   ]);
+  if (interrupted) {
+    return {
+      finishReason:
+        stepCount === 0
+          ? "interrupted-before-stream"
+          : "interrupted-mid-stream",
+    };
+  }
+
+  const result = streamText({
+    messages: convertToModelMessages(uiMessages),
+    tools: getTools(),
+    system: "you're a good bot. just chat and have fun.",
+    model,
+  });
+
+  await result
+    .toUIMessageStream({
+      onFinish: async ({ messages: newMessages }) => {
+        const toAdd = newMessages.map((m) => ({ ...m, id: m.id || nanoid() }));
+        await pushMessages(chatId, toAdd);
+      },
+    })
+    .pipeTo(writable, { preventClose: true });
+
+  return { finishReason: await result.finishReason };
 }
